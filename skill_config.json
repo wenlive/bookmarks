@@ -1,0 +1,40 @@
+{
+  "input": {
+    "bookmark_file": "data/bookmarks.html",
+    "rules_file": "data/category_rules.json"
+  },
+  "output": {
+    "directory": "output",
+    "prefix": "organized",
+    "filename_template": "organized_bookmarks_{timestamp}.html"
+  },
+  "fetch_options": {
+    "concurrent_limit": 15,
+    "timeout": 15,
+    "delay": 0.8,
+    "batch_size": 50,
+    "max_retries": 2,
+    "use_cache": true,
+    "cache_file": "data/bookmarks_with_info.json"
+  },
+  "classification_options": {
+    "min_score": 15,
+    "confirm_threshold": 25,
+    "domain_weight": 30,
+    "keyword_weight": 40,
+    "folder_weight": 25,
+    "content_weight": 5
+  },
+  "clustering_options": {
+    "min_cluster_size": 10,
+    "use_domain_clustering": true,
+    "use_keyword_clustering": true,
+    "max_bookmarks_without_clustering": 20
+  },
+  "skip_steps": [],
+  "logging": {
+    "level": "INFO",
+    "file": "logs/bookmarks_organizer.log",
+    "console": true
+  }
+}
