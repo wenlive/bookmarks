@@ -51,22 +51,119 @@ def test_classifier_uses_metadata_title_and_exports_confirmation(tmp_path):
 
 
 def test_cluster_and_generate_html():
-    bookmarks = [
-        {
-            "id": f"bookmark_{index}",
-            "name": f"Python Article {index}",
-            "url": f"https://docs.python.org/{index}",
-            "domain": "docs.python.org",
-            "metadata": {"title": "Python Documentation", "description": "python guide", "keywords": "python"},
-            "classification": {"category": "编程语言/Python"},
-        }
-        for index in range(12)
-    ]
-    clusterer = cluster_module.BookmarkClusterer(min_cluster_size=3)
+    bookmarks = []
+    for index in range(6):
+        bookmarks.append(
+            {
+                "id": f"bookmark_python_{index}",
+                "name": f"Python FastAPI {index}",
+                "url": f"https://docs.python.org/{index}",
+                "domain": "docs.python.org",
+                "metadata": {"title": "Python FastAPI Guide", "description": "python fastapi guide", "keywords": "python fastapi"},
+                "classification": {"category": "编程语言/Python"},
+            }
+        )
+    for index in range(6):
+        bookmarks.append(
+            {
+                "id": f"bookmark_realpython_{index}",
+                "name": f"Python Asyncio {index}",
+                "url": f"https://realpython.com/{index}",
+                "domain": "realpython.com",
+                "metadata": {"title": "Python Asyncio Tutorial", "description": "python asyncio tutorial", "keywords": "python asyncio"},
+                "classification": {"category": "编程语言/Python"},
+            }
+        )
+    clusterer = cluster_module.BookmarkClusterer(min_cluster_size=3, max_depth=3)
     hierarchy = clusterer.build_hierarchy(bookmarks, "编程语言/Python", threshold=5)
     html = html_module.BookmarkHTMLGenerator().generate_html({"编程语言/Python": hierarchy})
     assert "NETSCAPE-Bookmark-file-1" in html
+    assert hierarchy["children"]
     assert "编程语言/Python" in html
+    assert "docs.python.org" in html
+    assert "realpython.com" in html
+
+
+def test_generate_html_supports_recursive_nodes():
+    hierarchy = {
+        "编程语言/Python": {
+            "name": "编程语言/Python",
+            "node_type": "topic",
+            "count": 3,
+            "bookmarks": [],
+            "children": [
+                {
+                    "name": "Web 开发",
+                    "node_type": "topic",
+                    "count": 3,
+                    "bookmarks": [],
+                    "children": [
+                        {
+                            "name": "FastAPI",
+                            "node_type": "topic",
+                            "count": 2,
+                            "bookmarks": [
+                                {"name": "FastAPI Docs", "url": "https://fastapi.tiangolo.com/"},
+                                {"name": "FastAPI Tutorial", "url": "https://example.com/fastapi"},
+                            ],
+                            "children": [],
+                        },
+                        {
+                            "name": "Flask",
+                            "node_type": "topic",
+                            "count": 1,
+                            "bookmarks": [
+                                {"name": "Flask Docs", "url": "https://flask.palletsprojects.com/"},
+                            ],
+                            "children": [],
+                        },
+                    ],
+                }
+            ],
+        }
+    }
+    html = html_module.BookmarkHTMLGenerator().generate_html(hierarchy)
+    assert html.count("<H3") >= 4
+    assert "Web 开发" in html
+    assert "FastAPI" in html
+    assert "Flask Docs" in html
+
+
+def test_optimize_tree_collapses_single_child_and_merges_others():
+    clusterer = cluster_module.BookmarkClusterer(min_cluster_size=3, merge_small_nodes_threshold=2)
+    node = {
+        "name": "Root",
+        "node_type": "topic",
+        "bookmarks": [],
+        "children": [
+            {
+                "name": "Only Child",
+                "node_type": "topic",
+                "bookmarks": [],
+                "children": [
+                    {
+                        "name": "Only Grandchild",
+                        "node_type": "topic",
+                        "bookmarks": [{"name": "Deep Link", "url": "https://example.com/deep"}],
+                        "children": [],
+                        "count": 1,
+                    }
+                ],
+                "count": 1,
+            },
+            {
+                "name": "Tiny",
+                "node_type": "topic",
+                "bookmarks": [{"name": "Tiny Link", "url": "https://example.com/tiny"}],
+                "children": [],
+                "count": 1,
+            },
+        ],
+        "count": 2,
+    }
+    optimized = clusterer.optimize_tree(node, is_root=True)
+    assert optimized["children"][0]["name"] == "Only Grandchild"
+    assert any(bookmark["name"] == "Tiny Link" for bookmark in optimized["bookmarks"])
 
 
 def test_config_paths_are_resolved_relative_to_config_file(tmp_path):

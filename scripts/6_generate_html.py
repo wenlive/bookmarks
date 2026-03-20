@@ -26,38 +26,38 @@ class BookmarkHTMLGenerator:
             .replace('"', "&quot;")
         )
 
-    def generate_bookmark_item(self, bookmark: dict) -> str:
+    @staticmethod
+    def normalize_node(node_name: str, node_data: dict) -> dict:
+        return {
+            "name": node_data.get("name", node_name),
+            "children": node_data.get("children") or [],
+            "bookmarks": node_data.get("bookmarks") or [],
+            "count": node_data.get("count", len(node_data.get("bookmarks", []))),
+            "node_type": node_data.get("node_type", "mixed"),
+        }
+
+    def generate_bookmark_item(self, bookmark: dict, level: int = 3) -> str:
         self.bookmark_count += 1
         name = self.escape_html(bookmark.get("name", "未命名"))
         url = self.escape_html(bookmark.get("url", ""))
         add_date = bookmark.get("add_date") or str(int(datetime.now().timestamp()))
         icon = bookmark.get("icon", "")
         icon_attr = f' ICON="{self.escape_html(icon)}"' if icon else ""
-        return f'        <DT><A HREF="{url}" ADD_DATE="{add_date}"{icon_attr}>{name}</A>\n'
+        indent = "    " * level
+        return f'{indent}<DT><A HREF="{url}" ADD_DATE="{add_date}"{icon_attr}>{name}</A>\n'
 
-    def generate_subcategory(self, category_name: str, subcategory_data: dict, level: int = 2) -> str:
+    def generate_folder(self, node: dict, level: int = 2) -> str:
         self.folder_count += 1
-        display_name = category_name.split("/")[-1]
         indent = "    " * level
         add_date = str(int(datetime.now().timestamp()))
-        html = f'{indent}<DT><H3 ADD_DATE="{add_date}">{self.escape_html(display_name)}</H3>\n'
+        html = f'{indent}<DT><H3 ADD_DATE="{add_date}">{self.escape_html(node.get("name", "未命名目录"))}</H3>\n'
         html += f"{indent}<DL><p>\n"
-        for bookmark in subcategory_data.get("bookmarks", []):
-            html += self.generate_bookmark_item(bookmark)
+        children = sorted(node.get("children", []), key=lambda item: (-item.get("count", 0), item.get("name", "")))
+        for child in children:
+            html += self.generate_folder(child, level=level + 1)
+        for bookmark in node.get("bookmarks", []):
+            html += self.generate_bookmark_item(bookmark, level=level + 1)
         html += f"{indent}</DL><p>\n"
-        return html
-
-    def generate_category(self, category_name: str, category_data: dict) -> str:
-        self.folder_count += 1
-        add_date = str(int(datetime.now().timestamp()))
-        display_name = category_name
-        html = f'    <DT><H3 ADD_DATE="{add_date}">{self.escape_html(display_name)}</H3>\n'
-        html += "    <DL><p>\n"
-        for sub_name, sub_data in category_data.get("subcategories", {}).items():
-            html += self.generate_subcategory(sub_name, sub_data, level=2)
-        for bookmark in category_data.get("bookmarks", []):
-            html += self.generate_bookmark_item(bookmark)
-        html += "    </DL><p>\n"
         return html
 
     def generate_html(self, hierarchy: Dict) -> str:
@@ -70,16 +70,17 @@ class BookmarkHTMLGenerator:
         other_category = None
         categories = []
         for category, data in hierarchy.items():
+            node = self.normalize_node(category, data)
             if category == "其他/未分类":
-                other_category = (category, data)
+                other_category = node
             else:
-                categories.append((category, data))
-        categories.sort(key=lambda item: item[1]["count"], reverse=True)
+                categories.append(node)
+        categories.sort(key=lambda item: (-item["count"], item["name"]))
 
-        for category, data in categories:
-            html += self.generate_category(category, data)
+        for node in categories:
+            html += self.generate_folder(node)
         if other_category:
-            html += self.generate_category(*other_category)
+            html += self.generate_folder(other_category)
 
         html += "    </DL><p>\n"
         html += "    <DT><H3>其他书签</H3>\n    <DL><p>\n    </DL><p>\n"
