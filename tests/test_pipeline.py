@@ -242,3 +242,69 @@ def test_cli_respects_config_and_creates_outputs(tmp_path):
     assert (tmp_path / "runtime" / "output" / "reports" / "needs_confirmation.json").exists()
     assert (tmp_path / "runtime" / "output" / "reports" / "duplicates.json").exists()
     assert (tmp_path / "runtime" / "logs" / "app.log").exists()
+
+
+def test_topic_collection_is_deterministic_for_same_inputs():
+    clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2)
+    bookmark = _bookmark(1, name="FastAPI 官方文档", url="https://fastapi.tiangolo.com/tutorial/", domain="fastapi.tiangolo.com", category="编程/Python Web", folder=["学习", "FastAPI"], resource_type="文档", description="python fastapi web api tutorial", keywords="python,fastapi,api")
+    features = [clusterer.build_feature_set(bookmark) for _ in range(5)]
+    topic_sets = [feature.topics for feature in features]
+    assert all(topic_set == topic_sets[0] for topic_set in topic_sets[1:])
+    assert features[0].primary_topic == "编程/Python Web"
+
+
+def test_same_label_clusters_get_unique_subcategory_names():
+    clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2)
+    clusterer._connected_components = lambda bookmarks, features, threshold=0.34: [bookmarks[:2], bookmarks[2:]]
+    clusterer._split_if_needed = lambda clusters: clusters
+    clusterer._merge_if_needed = lambda clusters: clusters
+    bookmarks = [
+        _bookmark(1, name="FastAPI 官方文档", url="https://fastapi.tiangolo.com/tutorial/", domain="fastapi.tiangolo.com", category="编程/Python Web", folder=["学习", "FastAPI"], resource_type="文档", description="python fastapi web api tutorial", keywords="python,fastapi,api"),
+        _bookmark(2, name="FastAPI 教程", url="https://realpython.com/fastapi-course/", domain="realpython.com", category="编程/Python Web", folder=["学习", "FastAPI"], resource_type="博客", description="python fastapi course", keywords="python,fastapi,course"),
+        _bookmark(3, name="FastAPI 仓库模板", url="https://github.com/example/fastapi-template", domain="github.com", category="编程/Python Web", folder=["学习", "FastAPI"], resource_type="仓库", description="python fastapi template repo", keywords="python,fastapi,template"),
+        _bookmark(4, name="FastAPI Worker 仓库", url="https://github.com/example/fastapi-worker", domain="github.com", category="编程/Python Web", folder=["学习", "FastAPI"], resource_type="仓库", description="python fastapi worker repo", keywords="python,fastapi,worker"),
+    ]
+    hierarchy = clusterer.build_hierarchy(bookmarks, "编程/Python Web", threshold=1)
+    names = sorted(hierarchy["subcategories"].keys())
+    assert len(names) == 2
+    assert len(set(names)) == 2
+    assert names[0] == "编程/Python Web/学习/FastAPI"
+    assert names[1] == "编程/Python Web/学习/FastAPI (2)"
+
+
+def test_main_preserves_leaf_category_for_unsplit_clusters():
+    clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2)
+    hierarchy = {
+        "编程语言": clusterer.build_hierarchy([], "编程语言", threshold=20),
+    }
+    hierarchy["编程语言"]["bookmarks"] = []
+    hierarchy["编程语言"]["subcategories"] = {}
+    hierarchy["编程语言"]["count"] = 0
+
+    python_cluster = [
+        _bookmark(1, name="Python 官方文档", url="https://docs.python.org/3/", domain="docs.python.org", category="编程语言/Python", folder=["学习", "Python"]),
+    ]
+    rust_cluster = [
+        _bookmark(2, name="Rust 官方文档", url="https://doc.rust-lang.org/book/", domain="doc.rust-lang.org", category="编程语言/Rust", folder=["学习", "Rust"]),
+    ]
+
+    for cluster in (python_cluster, rust_cluster):
+        cluster_category = clusterer._derive_cluster_label(cluster, "其他/未分类")
+        category_bucket = hierarchy["编程语言"]
+        category_bucket["count"] += len(cluster)
+        built = clusterer.build_hierarchy(cluster, cluster_category, threshold=20)
+        if built.get("subcategories"):
+            for name, item in built["subcategories"].items():
+                unique_name = clusterer._unique_subcategory_name(category_bucket["subcategories"], name)
+                category_bucket["subcategories"][unique_name] = item
+            category_bucket["bookmarks"].extend(built.get("bookmarks", []))
+        else:
+            unique_name = clusterer._unique_subcategory_name(category_bucket["subcategories"], built["category"])
+            category_bucket["subcategories"][unique_name] = {
+                **built,
+                "category": unique_name,
+            }
+
+    programming = hierarchy["编程语言"]
+    assert sorted(programming["subcategories"].keys()) == ["编程语言/Python", "编程语言/Rust"]
+    assert programming["bookmarks"] == []
