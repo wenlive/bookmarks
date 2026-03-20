@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from test_pipeline_support import write_enriched_fixture  # noqa: E402
+from test_pipeline_support import build_metadata, write_enriched_fixture  # noqa: E402
 from scripts_compat import common_module, parse_bookmarks_module, classify_module, cluster_module, html_module, copy_module, fetch_module  # noqa: E402
 
 
@@ -37,7 +37,10 @@ def test_classifier_uses_metadata_title_and_exports_confirmation(tmp_path):
         "url": "https://www.python.org/dev/",
         "domain": "www.python.org",
         "original_folder_path": ["学习"],
-        "metadata": {"title": "Python Packaging Guide", "description": ""},
+        "metadata": build_metadata(
+            "Python Packaging Guide", "", "python,packaging", "Python", "packaging docs",
+            page_type_hints=["documentation"], site_name="Python", brand_terms=["python"],
+        ),
     }
     category, score, _ = classifier.classify_bookmark(bookmark)
     assert category == "编程语言/Python"
@@ -57,7 +60,10 @@ def test_cluster_and_generate_html():
             "name": f"Python Article {index}",
             "url": f"https://docs.python.org/{index}",
             "domain": "docs.python.org",
-            "metadata": {"title": "Python Documentation", "description": "python guide", "keywords": "python"},
+            "metadata": build_metadata(
+                "Python Documentation", "python guide", "python", "Python", "python docs",
+                page_type_hints=["documentation"], site_name="Python", brand_terms=["python"],
+            ),
             "classification": {"category": "编程语言/Python"},
         }
         for index in range(12)
@@ -104,6 +110,101 @@ def test_broken_links_report_export(tmp_path):
     exported = json.loads(report.read_text(encoding="utf-8"))
     assert count == 1
     assert exported["broken_links"][0]["status_code"] == 404
+
+
+class FakeResponse:
+    def __init__(self, status: int, url: str, html: str):
+        self.status = status
+        self.url = url
+        self._html = html
+
+    async def text(self, errors: str = "ignore") -> str:
+        return self._html
+
+
+class FakeRequestContext:
+    def __init__(self, response: FakeResponse):
+        self.response = response
+
+    async def __aenter__(self):
+        return self.response
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class FakeSession:
+    def __init__(self, pages: dict[str, FakeResponse]):
+        self.pages = pages
+        self.requested_urls: list[str] = []
+
+    def get(self, url: str, **kwargs):
+        self.requested_urls.append(url)
+        return FakeRequestContext(self.pages[url])
+
+
+def test_fetch_with_site_profile_and_homepage_enrichment():
+    deep_url = "https://docs.example.com/manual/api/ref?lang=en&mode=full"
+    homepage_url = "https://docs.example.com/"
+    deep_html = """
+    <html lang='en'><head>
+      <title>Docs</title>
+      <meta name='description' content='Quick reference'>
+      <meta property='og:title' content='API Reference'>
+      <meta property='og:description' content='Reference manual'>
+      <meta property='og:site_name' content='Example Docs'>
+      <meta name='twitter:title' content='API Reference on X'>
+      <meta name='twitter:description' content='Reference on X'>
+      <link rel='canonical' href='/canonical/ref'>
+      <script type='application/ld+json'>{"@type":"TechArticle"}</script>
+    </head><body>
+      <nav>Docs API Guides</nav>
+      <main><h1>Reference</h1><h2>Authentication</h2>Short docs page.</main>
+    </body></html>
+    """
+    homepage_html = """
+    <html lang='en'><head>
+      <title>Example Docs Home</title>
+      <meta property='og:site_name' content='Example Docs'>
+      <meta property='og:description' content='Developer documentation portal'>
+    </head><body>
+      <main><h1>Example Docs</h1><h2>Guides</h2>Documentation manual reference api sdk portal.</main>
+    </body></html>
+    """
+    session = FakeSession({
+        deep_url: FakeResponse(200, deep_url, deep_html),
+        homepage_url: FakeResponse(200, homepage_url, homepage_html),
+    })
+
+    metadata = fetch_module.asyncio.run(fetch_module.fetch_with_aiohttp(session, deep_url, timeout=3, max_retries=0))
+
+    assert metadata["fetch_status"] == "success"
+    assert metadata["page_signals"]["canonical_url"] == "https://docs.example.com/canonical/ref"
+    assert metadata["page_signals"]["og:site_name"] == "Example Docs"
+    assert metadata["page_signals"]["schema_types"] == ["TechArticle"]
+    assert metadata["site_signals"]["homepage_fetch_status"] == "success"
+    assert metadata["site_signals"]["site_name"] == "Example Docs"
+    assert "documentation" in metadata["site_signals"]["site_type_candidates"]
+    assert metadata["normalized_url"] == deep_url
+    assert metadata["query_keys"] == ["lang", "mode"]
+    assert metadata["path_segments"] == ["manual", "api", "ref"]
+    assert metadata["site_profile"]["url"]["registrable_domain"] == "example.com"
+    assert session.requested_urls == [deep_url, homepage_url]
+
+
+def test_fetch_helpers_identify_url_and_site_types():
+    url_signals = fetch_module.extract_url_signals("https://blog.example.co.uk/post/1?tag=python&lang=en")
+    assert url_signals["subdomain"] == "blog"
+    assert url_signals["registrable_domain"] == "example.co.uk"
+    assert url_signals["path_segments"] == ["post", "1"]
+    assert url_signals["query_keys"] == ["tag", "lang"]
+
+    docs_hints = fetch_module.infer_page_type_hints(["API docs manual reference"], ["guide", "api"])
+    blog_hints = fetch_module.infer_page_type_hints(["Latest blog post article"], ["post"])
+    product_hints = fetch_module.infer_page_type_hints(["Pricing features about our platform"], ["pricing"])
+    assert "documentation" in docs_hints
+    assert "blog" in blog_hints
+    assert "product" in product_hints
 
 
 def test_cli_respects_config_and_creates_outputs(tmp_path):
