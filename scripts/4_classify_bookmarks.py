@@ -368,7 +368,10 @@ class BookmarkClassifier:
                         "open_topic_candidates": classification["open_topic_candidates"][:3],
                     }
                 )
-                if classification["category"] != self.default_category:
+                if (
+                    classification["category"] != self.default_category
+                    or classification["open_topic_candidates"]
+                ):
                     confirm_needed.append(classified)
 
         stats = {
