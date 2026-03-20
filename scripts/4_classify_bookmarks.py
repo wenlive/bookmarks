@@ -8,6 +8,25 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Tuple
 
+
+def metadata_texts(metadata: dict) -> dict:
+    page = metadata.get("page_signals", {})
+    site = metadata.get("site_signals", {})
+    profile = metadata.get("site_profile", {})
+    page_profile = profile.get("page", {}) if isinstance(profile, dict) else {}
+    site_profile = profile.get("site", {}) if isinstance(profile, dict) else {}
+    return {
+        "title": metadata.get("title") or page.get("title") or page_profile.get("title") or "",
+        "description": metadata.get("description") or page.get("description") or page_profile.get("description") or "",
+        "keywords": metadata.get("keywords") or page.get("keywords") or page_profile.get("keywords") or "",
+        "h1": metadata.get("h1") or page.get("h1") or page_profile.get("h1") or "",
+        "content_preview": metadata.get("content_preview") or page.get("content_preview") or page_profile.get("content_preview") or "",
+        "page_type_hints": " ".join(page.get("page_type_hints") or page_profile.get("page_type_hints") or []),
+        "site_type_candidates": " ".join(site.get("site_type_candidates") or site_profile.get("site_type_candidates") or []),
+        "brand_terms": " ".join(site.get("brand_terms") or site_profile.get("brand_terms") or []),
+        "site_name": site.get("site_name") or site_profile.get("site_name") or page.get("og:site_name") or page_profile.get("og:site_name") or "",
+    }
+
 from common import build_parser, configure_logging, ensure_parent, load_config_from_args
 
 
@@ -40,14 +59,14 @@ class BookmarkClassifier:
         return 0
 
     def calculate_keyword_score(self, bookmark: dict, category_rules: dict) -> int:
-        metadata = bookmark.get("metadata", {})
-        text = " ".join([bookmark.get("name", ""), metadata.get("keywords", ""), metadata.get("description", "")])
+        metadata = metadata_texts(bookmark.get("metadata", {}))
+        text = " ".join([bookmark.get("name", ""), metadata["keywords"], metadata["description"], metadata["site_name"], metadata["brand_terms"]])
         score = sum(20 for keyword in category_rules.get("keywords", []) if self._contains_keyword(text, keyword))
         return min(score, 100)
 
     def calculate_title_score(self, bookmark: dict, category_rules: dict) -> int:
-        metadata = bookmark.get("metadata", {})
-        candidates = [bookmark.get("name", ""), metadata.get("title", ""), metadata.get("h1", "")]
+        metadata = metadata_texts(bookmark.get("metadata", {}))
+        candidates = [bookmark.get("name", ""), metadata["title"], metadata["h1"], metadata["site_name"]]
         for pattern in category_rules.get("title_patterns", []):
             if any(re.search(pattern, candidate, re.IGNORECASE) for candidate in candidates if candidate):
                 return 80
@@ -61,8 +80,8 @@ class BookmarkClassifier:
         return 0
 
     def calculate_content_score(self, bookmark: dict, category_rules: dict) -> int:
-        metadata = bookmark.get("metadata", {})
-        content = " ".join([metadata.get("description", ""), metadata.get("h1", ""), metadata.get("content_preview", "")])
+        metadata = metadata_texts(bookmark.get("metadata", {}))
+        content = " ".join([metadata["description"], metadata["h1"], metadata["content_preview"], metadata["page_type_hints"], metadata["site_type_candidates"]])
         score = sum(10 for keyword in category_rules.get("keywords", []) if self._contains_keyword(content, keyword))
         return min(score, 50)
 

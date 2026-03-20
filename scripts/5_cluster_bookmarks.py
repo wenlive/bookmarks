@@ -11,6 +11,23 @@ from typing import Dict, List
 from common import build_parser, configure_logging, ensure_parent, load_config_from_args
 
 
+def metadata_cluster_text(metadata: dict) -> str:
+    page = metadata.get("page_signals", {})
+    site = metadata.get("site_signals", {})
+    profile = metadata.get("site_profile", {})
+    page_profile = profile.get("page", {}) if isinstance(profile, dict) else {}
+    site_profile = profile.get("site", {}) if isinstance(profile, dict) else {}
+    parts = [
+        metadata.get("title") or page.get("title") or page_profile.get("title") or "",
+        metadata.get("description") or page.get("description") or page_profile.get("description") or "",
+        metadata.get("keywords") or page.get("keywords") or page_profile.get("keywords") or "",
+        " ".join(page.get("page_type_hints") or page_profile.get("page_type_hints") or []),
+        site.get("site_name") or site_profile.get("site_name") or "",
+        " ".join(site.get("brand_terms") or site_profile.get("brand_terms") or []),
+    ]
+    return " ".join(part for part in parts if part)
+
+
 STOPWORDS = {
     "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by",
     "from", "as", "is", "was", "are", "were", "been", "this", "that", "how", "what", "why",
@@ -31,14 +48,7 @@ class BookmarkClusterer:
     def cluster_by_keywords(self, bookmarks: List[dict]) -> Dict[str, List[dict]]:
         keyword_groups = defaultdict(list)
         for bookmark in bookmarks:
-            text = " ".join(
-                [
-                    bookmark.get("name", ""),
-                    bookmark.get("metadata", {}).get("title", ""),
-                    bookmark.get("metadata", {}).get("description", ""),
-                    bookmark.get("metadata", {}).get("keywords", ""),
-                ]
-            )
+            text = " ".join([bookmark.get("name", ""), metadata_cluster_text(bookmark.get("metadata", {}))])
             keywords = self.extract_keywords(text)
             keyword = Counter(keywords).most_common(self.max_keywords)
             label = keyword[0][0] if keyword else "其他"
