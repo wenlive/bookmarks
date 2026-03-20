@@ -229,6 +229,42 @@ def test_classifier_distinguishes_resource_types_within_same_topic():
 
 
 
+def test_classifier_exports_open_topic_only_bookmarks_for_confirmation(tmp_path):
+    rules_file = ROOT / "data" / "category_rules.json"
+    classifier = classify_module.BookmarkClassifier(rules_file, {"confirm_threshold": 80})
+    bookmark = {
+        "id": "bookmark_open_topic",
+        "name": "AcmeFlow release notes",
+        "url": "https://acmeflow.dev/releases/v1-2",
+        "domain": "acmeflow.dev",
+        "original_folder_path": ["Inbox"],
+        "metadata": {
+            "title": "AcmeFlow 1.2 release notes",
+            "description": "Release notes for the AcmeFlow developer workflow platform",
+            "site_profile": "AcmeFlow developer workflow platform release notes",
+            "keywords": "acmeflow, workflow, release notes",
+        },
+    }
+
+    results, stats, confirm_needed = classifier.classify_all([bookmark])
+    classification = results[0]["classification"]
+
+    assert classification["category"] == classifier.default_category
+    assert classification["primary_topics"] == []
+    assert classification["open_topic_candidates"]
+    assert any(candidate["topic"].lower() == "acmeflow" for candidate in classification["open_topic_candidates"])
+    assert stats["confirm_needed_count"] == 1
+    assert stats["confirm_needed_ids"] == ["bookmark_open_topic"]
+    assert confirm_needed[0]["id"] == "bookmark_open_topic"
+
+    report = tmp_path / "needs_confirmation.json"
+    classify_module.export_confirmation_report(confirm_needed, report)
+    exported = json.loads(report.read_text(encoding="utf-8"))
+    assert exported["count"] == 1
+    assert exported["bookmarks"][0]["id"] == "bookmark_open_topic"
+    assert exported["bookmarks"][0]["primary_topics"] == []
+
+
 def test_classifier_treats_folder_as_weak_prior_and_reports_low_confidence():
     rules_file = ROOT / "data" / "category_rules.json"
     classifier = classify_module.BookmarkClassifier(rules_file, {"confirm_threshold": 80})
