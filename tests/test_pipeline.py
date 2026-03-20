@@ -11,6 +11,29 @@ from test_pipeline_support import write_enriched_fixture  # noqa: E402
 from scripts_compat import common_module, parse_bookmarks_module, classify_module, cluster_module, html_module, copy_module, fetch_module  # noqa: E402
 
 
+def _bookmark(index, *, name, url, domain, category, folder, resource_type="文档", title="", description="", keywords="", content_preview=""):
+    return {
+        "id": f"bookmark_{index}",
+        "name": name,
+        "url": url,
+        "domain": domain,
+        "original_folder_path": folder,
+        "metadata": {
+            "title": title or name,
+            "description": description,
+            "keywords": keywords,
+            "content_preview": content_preview or description,
+            "resource_type": resource_type,
+        },
+        "classification": {
+            "category": category,
+            "all_scores": {
+                category: {"total": 95},
+            },
+        },
+    }
+
+
 def test_parse_bookmarks_deduplicates_urls():
     sample = ROOT / "tests" / "fixtures" / "sample_bookmarks.html"
     result = parse_bookmarks_module.parse_bookmarks(sample)
@@ -57,8 +80,8 @@ def test_cluster_and_generate_html():
             "name": f"Python Article {index}",
             "url": f"https://docs.python.org/{index}",
             "domain": "docs.python.org",
-            "metadata": {"title": "Python Documentation", "description": "python guide", "keywords": "python"},
-            "classification": {"category": "编程语言/Python"},
+            "metadata": {"title": "Python Documentation", "description": "python guide", "keywords": "python", "resource_type": "文档"},
+            "classification": {"category": "编程语言/Python", "all_scores": {"编程语言/Python": {"total": 90}}},
         }
         for index in range(12)
     ]
@@ -67,6 +90,63 @@ def test_cluster_and_generate_html():
     html = html_module.BookmarkHTMLGenerator().generate_html({"编程语言/Python": hierarchy})
     assert "NETSCAPE-Bookmark-file-1" in html
     assert "编程语言/Python" in html
+
+
+def test_rich_feature_clustering_groups_cross_domain_same_topic():
+    clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2)
+    bookmarks = [
+        _bookmark(1, name="FastAPI 官方文档", url="https://fastapi.tiangolo.com/tutorial/", domain="fastapi.tiangolo.com", category="编程/Python Web", folder=["学习", "FastAPI"], resource_type="文档", description="python fastapi web api tutorial", keywords="python,fastapi,api"),
+        _bookmark(2, name="FastAPI 部署指南", url="https://realpython.com/fastapi-deploy/", domain="realpython.com", category="编程/Python Web", folder=["学习", "Web"], resource_type="博客", description="python fastapi deployment web api", keywords="python,fastapi,deployment"),
+        _bookmark(3, name="FastAPI 示例仓库", url="https://github.com/example/fastapi-service", domain="github.com", category="编程/Python Web", folder=["代码", "FastAPI"], resource_type="仓库", description="python fastapi service repository", keywords="python,fastapi,repository"),
+    ]
+    hierarchy = clusterer.build_hierarchy(bookmarks, "编程/Python Web", threshold=1)
+    assert len(hierarchy["subcategories"]) == 1
+    only_cluster = next(iter(hierarchy["subcategories"].values()))
+    assert only_cluster["count"] == 3
+    assert "fastapi" in only_cluster["representative_tokens"]
+    assert only_cluster["cluster_reason"]
+    assert only_cluster["merge_from_categories"] == ["编程/Python Web"]
+
+
+def test_rich_feature_clustering_splits_same_domain_different_topics():
+    clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2)
+    bookmarks = [
+        _bookmark(1, name="OpenAI API Reference", url="https://platform.openai.com/docs/api-reference", domain="platform.openai.com", category="AI/LLM API", folder=["AI", "API"], resource_type="文档", description="openai api reference embeddings chat", keywords="openai,api,reference"),
+        _bookmark(2, name="OpenAI Embeddings Guide", url="https://platform.openai.com/docs/guides/embeddings", domain="platform.openai.com", category="AI/LLM API", folder=["AI", "API"], resource_type="文档", description="openai embeddings api guide", keywords="openai,embeddings,api"),
+        _bookmark(3, name="OpenAI Safety Research", url="https://platform.openai.com/research/safety", domain="platform.openai.com", category="AI/Research", folder=["AI", "Research"], resource_type="论文", description="alignment safety evaluation research", keywords="alignment,safety,research"),
+        _bookmark(4, name="OpenAI Alignment Notes", url="https://platform.openai.com/research/alignment", domain="platform.openai.com", category="AI/Research", folder=["AI", "Research"], resource_type="论文", description="alignment evaluation interpretability research", keywords="alignment,interpretability,research"),
+    ]
+    hierarchy = clusterer.build_hierarchy(bookmarks, "AI", threshold=1)
+    assert len(hierarchy["subcategories"]) == 2
+    cluster_sizes = sorted(item["count"] for item in hierarchy["subcategories"].values())
+    assert cluster_sizes == [2, 2]
+    for item in hierarchy["subcategories"].values():
+        assert item["source_folder_quality_score"] >= 0
+        assert "cluster_reason" in item
+
+
+def test_high_quality_folder_reused_and_low_quality_folder_split():
+    clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2)
+    high_quality = [
+        _bookmark(1, name="Django ORM Guide", url="https://docs.djangoproject.com/en/orm/", domain="docs.djangoproject.com", category="编程/Django", folder=["Backend", "Django"], resource_type="文档", description="django orm models querysets", keywords="django,orm,models"),
+        _bookmark(2, name="Django Forms Guide", url="https://docs.djangoproject.com/en/forms/", domain="docs.djangoproject.com", category="编程/Django", folder=["Backend", "Django"], resource_type="文档", description="django forms validation", keywords="django,forms,validation"),
+    ]
+    high_hierarchy = clusterer.build_hierarchy(high_quality, "编程/Django", threshold=1)
+    high_cluster = next(iter(high_hierarchy["subcategories"].values()))
+    assert high_cluster["source_folder_reused"] is True
+    assert high_cluster["source_folder_quality_score"] >= 0.68
+
+    low_quality = [
+        _bookmark(3, name="Kubernetes 入门", url="https://kubernetes.io/docs/tutorials/", domain="kubernetes.io", category="运维/Kubernetes", folder=["杂项"], resource_type="文档", description="kubernetes cluster tutorial", keywords="kubernetes,cluster"),
+        _bookmark(4, name="Figma 插件目录", url="https://www.figma.com/community/plugins", domain="www.figma.com", category="设计/Figma", folder=["杂项"], resource_type="工具", description="figma design plugin tools", keywords="figma,design,plugin"),
+        _bookmark(5, name="Rust Ownership", url="https://doc.rust-lang.org/book/ch04-00-understanding-ownership.html", domain="doc.rust-lang.org", category="编程/Rust", folder=["杂项"], resource_type="文档", description="rust ownership borrow checker", keywords="rust,ownership"),
+        _bookmark(6, name="Vue Router", url="https://router.vuejs.org/guide/", domain="router.vuejs.org", category="前端/Vue", folder=["杂项"], resource_type="文档", description="vue router navigation", keywords="vue,router"),
+    ]
+    low_hierarchy = clusterer.build_hierarchy(low_quality, "混合", threshold=1)
+    assert len(low_hierarchy["subcategories"]) >= 2
+    for item in low_hierarchy["subcategories"].values():
+        assert item["source_folder_reused"] is False
+        assert item["source_folder_quality_score"] < 0.68 or item["count"] == 1
 
 
 def test_config_paths_are_resolved_relative_to_config_file(tmp_path):
