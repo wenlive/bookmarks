@@ -28,7 +28,7 @@ def test_copy_step_is_noop_for_same_file(tmp_path):
     assert source.read_text(encoding="utf-8") == "demo"
 
 
-def test_classifier_uses_metadata_title_and_exports_confirmation(tmp_path):
+def test_classifier_outputs_multidimensional_labels_and_confirmation_report(tmp_path):
     rules_file = ROOT / "data" / "category_rules.json"
     classifier = classify_module.BookmarkClassifier(rules_file, {"confirm_threshold": 90, "title_weight": 50})
     bookmark = {
@@ -42,15 +42,20 @@ def test_classifier_uses_metadata_title_and_exports_confirmation(tmp_path):
             page_type_hints=["documentation"], site_name="Python", brand_terms=["python"],
         ),
     }
-    category, score, _ = classifier.classify_bookmark(bookmark)
-    assert category == "编程语言/Python"
-    assert score > 0
+    classification = classifier.classify_bookmark(bookmark)
+    assert classification["category"] == "编程语言/Python"
+    assert "编程语言/Python" in classification["primary_topics"]
+    assert classification["resource_type"] in {"文档", "教程"}
+    assert "学习" in classification["intent_labels"]
+    assert classification["score"] > 0
+    assert "classification_evidence" in classification
 
-    bookmark["classification"] = {"category": category, "score": score}
+    bookmark["classification"] = classification
     report = tmp_path / "needs_confirmation.json"
     classify_module.export_confirmation_report([bookmark], report)
     exported = json.loads(report.read_text(encoding="utf-8"))
     assert exported["count"] == 1
+    assert exported["bookmarks"][0]["primary_topics"][0] == "编程语言/Python"
 
 
 def test_cluster_and_generate_html():
@@ -263,3 +268,90 @@ def test_cli_respects_config_and_creates_outputs(tmp_path):
     assert (tmp_path / "runtime" / "output" / "reports" / "needs_confirmation.json").exists()
     assert (tmp_path / "runtime" / "output" / "reports" / "duplicates.json").exists()
     assert (tmp_path / "runtime" / "logs" / "app.log").exists()
+
+
+def test_classifier_keeps_rule_and_open_topics_together():
+    rules_file = ROOT / "data" / "category_rules.json"
+    classifier = classify_module.BookmarkClassifier(rules_file)
+    bookmark = {
+        "id": "bookmark_mix",
+        "name": "PostgreSQL + Neon branch workflow",
+        "url": "https://neon.tech/docs/guides/branching",
+        "domain": "neon.tech",
+        "original_folder_path": ["数据库"],
+        "metadata": {
+            "title": "PostgreSQL branching on Neon",
+            "description": "Serverless Postgres branching tutorial",
+            "site_profile": "Neon provides serverless PostgreSQL with branching",
+            "keywords": "postgresql, branching, neon",
+        },
+    }
+    classification = classifier.classify_bookmark(bookmark)
+    assert "数据库/PostgreSQL" in classification["primary_topics"]
+    assert any(candidate["topic"] == "Neon" for candidate in classification["open_topic_candidates"])
+
+
+
+def test_classifier_distinguishes_resource_types_within_same_topic():
+    rules_file = ROOT / "data" / "category_rules.json"
+    classifier = classify_module.BookmarkClassifier(rules_file)
+    official_doc = {
+        "id": "bookmark_doc",
+        "name": "Kubernetes Documentation",
+        "url": "https://kubernetes.io/docs/concepts/overview/",
+        "domain": "kubernetes.io",
+        "original_folder_path": ["运维"],
+        "metadata": {
+            "title": "Kubernetes Documentation",
+            "description": "Official Kubernetes docs",
+            "site_profile": "Official production-grade container orchestration",
+        },
+    }
+    community_blog = {
+        "id": "bookmark_blog",
+        "name": "Kubernetes incident notes",
+        "url": "https://medium.com/@ops/kubernetes-incident-notes-123",
+        "domain": "medium.com",
+        "original_folder_path": ["运维"],
+        "metadata": {
+            "title": "Kubernetes incident notes",
+            "description": "A blog post about debugging Kubernetes networking",
+            "site_profile": "Community blog post for SREs",
+        },
+    }
+    doc_classification = classifier.classify_bookmark(official_doc)
+    blog_classification = classifier.classify_bookmark(community_blog)
+    assert "分布式系统/Kubernetes" in doc_classification["primary_topics"]
+    assert "分布式系统/Kubernetes" in blog_classification["primary_topics"]
+    assert doc_classification["resource_type"] == "文档"
+    assert blog_classification["resource_type"] == "博客"
+    assert "官方" in doc_classification["quality_signals"]
+    assert "社区" in blog_classification["quality_signals"]
+
+
+
+def test_classifier_treats_folder_as_weak_prior_and_reports_low_confidence():
+    rules_file = ROOT / "data" / "category_rules.json"
+    classifier = classify_module.BookmarkClassifier(rules_file, {"confirm_threshold": 80})
+    bookmark = {
+        "id": "bookmark_folder_bias",
+        "name": "Kubernetes security hardening checklist",
+        "url": "https://owasp.org/www-project-kubernetes-top-ten/",
+        "domain": "owasp.org",
+        "original_folder_path": ["Python 学习"],
+        "metadata": {
+            "title": "Kubernetes Security Hardening Checklist",
+            "description": "Security checklist for production Kubernetes clusters",
+            "site_profile": "OWASP project for Kubernetes security",
+        },
+    }
+    results, stats, _ = classifier.classify_all([bookmark])
+    classification = results[0]["classification"]
+    assert "安全" in classification["primary_topics"]
+    assert "分布式系统/Kubernetes" in classification["secondary_topics"] or any(
+        item["topic"] == "分布式系统/Kubernetes" for item in classification["classification_evidence"]["topic_scores"]
+    )
+    assert classification["folder_alignment_score"] == 0
+    assert stats["low_confidence_items"][0]["id"] == "bookmark_folder_bias"
+    assert "resource_type_distribution" in stats
+    assert "uncovered_topic_candidates" in stats
