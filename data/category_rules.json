@@ -1,232 +1,882 @@
 {
   "categories": {
     "编程语言/Go": {
-      "domains": ["golang.org", "go.dev", "studygolang.com", "golangtc.com", "gowalker.org"],
-      "keywords": ["go", "golang", "go语言", "gopher", "goroutine", "channel"],
-      "title_patterns": ["[Gg]o.*教程", "[Gg]olang.*实践", "[Gg]o.*指南", "[Gg]o.*pprof", "[Gg]o.*test"],
-      "folder_keywords": ["go", "golang", "go-pprof", "go-test"]
+      "domains": [
+        "golang.org",
+        "go.dev",
+        "studygolang.com",
+        "golangtc.com",
+        "gowalker.org"
+      ],
+      "keywords": [
+        "go",
+        "golang",
+        "go语言",
+        "gopher",
+        "goroutine",
+        "channel"
+      ],
+      "title_patterns": [
+        "[Gg]o.*教程",
+        "[Gg]olang.*实践",
+        "[Gg]o.*指南",
+        "[Gg]o.*pprof",
+        "[Gg]o.*test"
+      ],
+      "folder_keywords": [
+        "go",
+        "golang",
+        "go-pprof",
+        "go-test"
+      ]
     },
     "编程语言/Rust": {
-      "domains": ["rust-lang.org", "crates.io", "docs.rs"],
-      "keywords": ["rust", "rustlang", "cargo", "rustc"],
-      "title_patterns": ["[Rr]ust.*"],
-      "folder_keywords": ["rust"]
+      "domains": [
+        "rust-lang.org",
+        "crates.io",
+        "docs.rs"
+      ],
+      "keywords": [
+        "rust",
+        "rustlang",
+        "cargo",
+        "rustc"
+      ],
+      "title_patterns": [
+        "[Rr]ust.*"
+      ],
+      "folder_keywords": [
+        "rust"
+      ]
     },
     "编程语言/C-C++": {
-      "domains": ["isocpp.org", "cppreference.com"],
-      "keywords": ["c++", "cpp", "c语言", "c language", "gcc", "clang", "llvm"],
-      "title_patterns": ["[Cc]\\+\\+.*", "[Cc]语言.*"],
-      "folder_keywords": ["c", "cpp", "C", "CPP"]
+      "domains": [
+        "isocpp.org",
+        "cppreference.com"
+      ],
+      "keywords": [
+        "c++",
+        "cpp",
+        "c语言",
+        "c language",
+        "gcc",
+        "clang",
+        "llvm"
+      ],
+      "title_patterns": [
+        "[Cc]\\+\\+.*",
+        "[Cc]语言.*"
+      ],
+      "folder_keywords": [
+        "c",
+        "cpp",
+        "C",
+        "CPP"
+      ]
     },
     "编程语言/Python": {
-      "domains": ["python.org", "pypi.org", "pypi.python.org"],
-      "keywords": ["python", "python3", "django", "flask", "fastapi", "pip"],
-      "title_patterns": ["[Pp]ython.*", "[Dd]jango.*", "[Ff]lask.*"],
-      "folder_keywords": ["python"]
+      "domains": [
+        "python.org",
+        "pypi.org",
+        "pypi.python.org"
+      ],
+      "keywords": [
+        "python",
+        "python3",
+        "django",
+        "flask",
+        "fastapi",
+        "pip"
+      ],
+      "title_patterns": [
+        "[Pp]ython.*",
+        "[Dd]jango.*",
+        "[Ff]lask.*"
+      ],
+      "folder_keywords": [
+        "python"
+      ]
     },
     "编程语言/JavaScript": {
-      "domains": ["developer.mozilla.org", "nodejs.org", "npmjs.com", "typescriptlang.org"],
-      "keywords": ["javascript", "js", "typescript", "node", "nodejs", "react", "vue", "angular"],
-      "title_patterns": ["[Jj]avascript.*", "[Tt]ypescript.*", "[Rr]eact.*", "[Vv]ue.*"],
-      "folder_keywords": ["javascript", "js", "typescript", "nodejs"]
+      "domains": [
+        "developer.mozilla.org",
+        "nodejs.org",
+        "npmjs.com",
+        "typescriptlang.org"
+      ],
+      "keywords": [
+        "javascript",
+        "js",
+        "typescript",
+        "node",
+        "nodejs",
+        "react",
+        "vue",
+        "angular"
+      ],
+      "title_patterns": [
+        "[Jj]avascript.*",
+        "[Tt]ypescript.*",
+        "[Rr]eact.*",
+        "[Vv]ue.*"
+      ],
+      "folder_keywords": [
+        "javascript",
+        "js",
+        "typescript",
+        "nodejs"
+      ]
     },
     "数据库/TiDB": {
-      "domains": ["pingcap.com", "docs.pingcap.com", "tidb.io"],
-      "keywords": ["tidb", "tikv", "pd", "pingcap"],
-      "title_patterns": ["[Tt]idb.*", "[Tt]ikv.*"],
-      "folder_keywords": ["tidb", "TiDB"]
+      "domains": [
+        "pingcap.com",
+        "docs.pingcap.com",
+        "tidb.io"
+      ],
+      "keywords": [
+        "tidb",
+        "tikv",
+        "pd",
+        "pingcap"
+      ],
+      "title_patterns": [
+        "[Tt]idb.*",
+        "[Tt]ikv.*"
+      ],
+      "folder_keywords": [
+        "tidb",
+        "TiDB"
+      ]
     },
     "数据库/PostgreSQL": {
-      "domains": ["postgresql.org"],
-      "keywords": ["postgresql", "postgres", "pg", "psql"],
-      "title_patterns": ["[Pp]ostgres.*", "[Pp]g.*"],
-      "folder_keywords": ["pg", "PG", "postgres", "postgresql"]
+      "domains": [
+        "postgresql.org"
+      ],
+      "keywords": [
+        "postgresql",
+        "postgres",
+        "pg",
+        "psql"
+      ],
+      "title_patterns": [
+        "[Pp]ostgres.*",
+        "[Pp]g.*"
+      ],
+      "folder_keywords": [
+        "pg",
+        "PG",
+        "postgres",
+        "postgresql"
+      ]
     },
     "数据库/MySQL": {
-      "domains": ["mysql.com", "dev.mysql.com"],
-      "keywords": ["mysql", "mariadb"],
-      "title_patterns": ["[Mm]ysql.*"],
-      "folder_keywords": ["mysql", "MySQL"]
+      "domains": [
+        "mysql.com",
+        "dev.mysql.com"
+      ],
+      "keywords": [
+        "mysql",
+        "mariadb"
+      ],
+      "title_patterns": [
+        "[Mm]ysql.*"
+      ],
+      "folder_keywords": [
+        "mysql",
+        "MySQL"
+      ]
     },
     "数据库/Redis": {
-      "domains": ["redis.io"],
-      "keywords": ["redis", "缓存", "cache"],
-      "title_patterns": ["[Rr]edis.*"],
-      "folder_keywords": ["redis", "Redis"]
+      "domains": [
+        "redis.io"
+      ],
+      "keywords": [
+        "redis",
+        "缓存",
+        "cache"
+      ],
+      "title_patterns": [
+        "[Rr]edis.*"
+      ],
+      "folder_keywords": [
+        "redis",
+        "Redis"
+      ]
     },
     "数据库/其他": {
-      "domains": ["mongodb.com", "sqlite.org", "cassandra.apache.org"],
-      "keywords": ["数据库", "database", "sql", "nosql", "mongodb", "sqlite", "etcd", "rocksdb", "duckdb"],
-      "title_patterns": ["[Dd]atabase.*", "[Mm]ongodb.*"],
-      "folder_keywords": ["数据库", "database", "etcd", "rocksdb", "duckdb"]
+      "domains": [
+        "mongodb.com",
+        "sqlite.org",
+        "cassandra.apache.org"
+      ],
+      "keywords": [
+        "数据库",
+        "database",
+        "sql",
+        "nosql",
+        "mongodb",
+        "sqlite",
+        "etcd",
+        "rocksdb",
+        "duckdb"
+      ],
+      "title_patterns": [
+        "[Dd]atabase.*",
+        "[Mm]ongodb.*"
+      ],
+      "folder_keywords": [
+        "数据库",
+        "database",
+        "etcd",
+        "rocksdb",
+        "duckdb"
+      ]
     },
     "分布式系统/Docker": {
-      "domains": ["docker.com", "hub.docker.com"],
-      "keywords": ["docker", "container", "容器"],
-      "title_patterns": ["[Dd]ocker.*", "容器.*"],
-      "folder_keywords": ["docker", "Docker"]
+      "domains": [
+        "docker.com",
+        "hub.docker.com"
+      ],
+      "keywords": [
+        "docker",
+        "container",
+        "容器"
+      ],
+      "title_patterns": [
+        "[Dd]ocker.*",
+        "容器.*"
+      ],
+      "folder_keywords": [
+        "docker",
+        "Docker"
+      ]
     },
     "分布式系统/Kubernetes": {
-      "domains": ["kubernetes.io", "k8s.io"],
-      "keywords": ["kubernetes", "k8s", "kubectl", "k3s"],
-      "title_patterns": ["[Kk]ubernetes.*", "K8s.*"],
-      "folder_keywords": ["kubernetes", "k8s", "Kubernetes"]
+      "domains": [
+        "kubernetes.io",
+        "k8s.io"
+      ],
+      "keywords": [
+        "kubernetes",
+        "k8s",
+        "kubectl",
+        "k3s"
+      ],
+      "title_patterns": [
+        "[Kk]ubernetes.*",
+        "K8s.*"
+      ],
+      "folder_keywords": [
+        "kubernetes",
+        "k8s",
+        "Kubernetes"
+      ]
     },
     "分布式系统/其他": {
-      "domains": ["etcd.io", "consul.io", "apache.org"],
-      "keywords": ["分布式", "distributed", "微服务", "microservice", "raft", "consensus", "arrow", "parquet", "rdma", "时序", "ap", "列存", "非易失内存"],
-      "title_patterns": ["分布式.*", "微服务.*", "[Rr]aft.*"],
-      "folder_keywords": ["分布式", "distributed", "arrow", "parquet", "benchmark", "时序", "AP", "列存", "RDMA", "非易失内存"]
+      "domains": [
+        "etcd.io",
+        "consul.io",
+        "apache.org"
+      ],
+      "keywords": [
+        "分布式",
+        "distributed",
+        "微服务",
+        "microservice",
+        "raft",
+        "consensus",
+        "arrow",
+        "parquet",
+        "rdma",
+        "时序",
+        "ap",
+        "列存",
+        "非易失内存"
+      ],
+      "title_patterns": [
+        "分布式.*",
+        "微服务.*",
+        "[Rr]aft.*"
+      ],
+      "folder_keywords": [
+        "分布式",
+        "distributed",
+        "arrow",
+        "parquet",
+        "benchmark",
+        "时序",
+        "AP",
+        "列存",
+        "RDMA",
+        "非易失内存"
+      ]
     },
     "消息队列": {
-      "domains": ["kafka.apache.org", "rabbitmq.com", "nsq.io"],
-      "keywords": ["kafka", "rabbitmq", "消息队列", "message queue", "mq", "nsq"],
-      "title_patterns": ["[Kk]afka.*", "[Rr]abbitmq.*", "消息.*"],
-      "folder_keywords": ["kafka", "rabbitmq", "mq"]
+      "domains": [
+        "kafka.apache.org",
+        "rabbitmq.com",
+        "nsq.io"
+      ],
+      "keywords": [
+        "kafka",
+        "rabbitmq",
+        "消息队列",
+        "message queue",
+        "mq",
+        "nsq"
+      ],
+      "title_patterns": [
+        "[Kk]afka.*",
+        "[Rr]abbitmq.*",
+        "消息.*"
+      ],
+      "folder_keywords": [
+        "kafka",
+        "rabbitmq",
+        "mq"
+      ]
     },
     "开源项目": {
-      "domains": ["github.com", "gitlab.com", "gitee.com", "bitbucket.org"],
+      "domains": [
+        "github.com",
+        "gitlab.com",
+        "gitee.com",
+        "bitbucket.org"
+      ],
       "keywords": [],
-      "title_patterns": ["GitHub.*", "GitLab.*"],
+      "title_patterns": [
+        "GitHub.*",
+        "GitLab.*"
+      ],
       "folder_keywords": []
     },
     "技术博客": {
-      "domains": ["medium.com", "juejin.cn", "segmentfault.com", "csdn.net", "cnblogs.com", "infoq.cn", "zhihu.com"],
-      "keywords": ["博客", "blog", "文章", "article"],
+      "domains": [
+        "medium.com",
+        "juejin.cn",
+        "segmentfault.com",
+        "csdn.net",
+        "cnblogs.com",
+        "infoq.cn",
+        "zhihu.com"
+      ],
+      "keywords": [
+        "博客",
+        "blog",
+        "文章",
+        "article"
+      ],
       "title_patterns": [],
-      "folder_keywords": ["blog", "BLOG", "博客"]
+      "folder_keywords": [
+        "blog",
+        "BLOG",
+        "博客"
+      ]
     },
     "云服务/AWS": {
-      "domains": ["aws.amazon.com"],
-      "keywords": ["aws", "amazon", "ec2", "s3", "lambda"],
-      "title_patterns": ["AWS.*"],
-      "folder_keywords": ["aws", "AWS"]
+      "domains": [
+        "aws.amazon.com"
+      ],
+      "keywords": [
+        "aws",
+        "amazon",
+        "ec2",
+        "s3",
+        "lambda"
+      ],
+      "title_patterns": [
+        "AWS.*"
+      ],
+      "folder_keywords": [
+        "aws",
+        "AWS"
+      ]
     },
     "云服务/其他": {
-      "domains": ["cloud.google.com", "azure.microsoft.com", "aliyun.com", "cloud.tencent.com"],
-      "keywords": ["云", "cloud", "azure", "gcp", "阿里云", "腾讯云", "supabase", "neon"],
-      "title_patterns": ["Azure.*", "阿里云.*"],
-      "folder_keywords": ["云", "cloud", "supabase", "neon", "AWS"]
+      "domains": [
+        "cloud.google.com",
+        "azure.microsoft.com",
+        "aliyun.com",
+        "cloud.tencent.com"
+      ],
+      "keywords": [
+        "云",
+        "cloud",
+        "azure",
+        "gcp",
+        "阿里云",
+        "腾讯云",
+        "supabase",
+        "neon"
+      ],
+      "title_patterns": [
+        "Azure.*",
+        "阿里云.*"
+      ],
+      "folder_keywords": [
+        "云",
+        "cloud",
+        "supabase",
+        "neon",
+        "AWS"
+      ]
     },
     "机器学习/AI": {
-      "domains": ["tensorflow.org", "pytorch.org", "openai.com", "huggingface.co", "anthropic.com"],
-      "keywords": ["机器学习", "machine learning", "深度学习", "deep learning", "ai", "人工智能", "neural network", "神经网络", "llm", "gpt", "chatgpt", "claude"],
-      "title_patterns": ["[Mm]achine [Ll]earning.*", "[Dd]eep [Ll]earning.*", "AI.*", "人工智能.*", "LLM.*", "GPT.*"],
-      "folder_keywords": ["llm", "LLM", "ai", "AI", "机器学习", "深度学习"]
+      "domains": [
+        "tensorflow.org",
+        "pytorch.org",
+        "openai.com",
+        "huggingface.co",
+        "anthropic.com"
+      ],
+      "keywords": [
+        "机器学习",
+        "machine learning",
+        "深度学习",
+        "deep learning",
+        "ai",
+        "人工智能",
+        "neural network",
+        "神经网络",
+        "llm",
+        "gpt",
+        "chatgpt",
+        "claude"
+      ],
+      "title_patterns": [
+        "[Mm]achine [Ll]earning.*",
+        "[Dd]eep [Ll]earning.*",
+        "AI.*",
+        "人工智能.*",
+        "LLM.*",
+        "GPT.*"
+      ],
+      "folder_keywords": [
+        "llm",
+        "LLM",
+        "ai",
+        "AI",
+        "机器学习",
+        "深度学习"
+      ]
     },
     "前端开发": {
-      "domains": ["css-tricks.com", "smashingmagazine.com", "frontendmasters.com"],
-      "keywords": ["前端", "frontend", "css", "html", "web开发", "响应式"],
-      "title_patterns": ["[Cc]ss.*", "[Hh]tml.*", "前端.*"],
-      "folder_keywords": ["前端", "frontend"]
+      "domains": [
+        "css-tricks.com",
+        "smashingmagazine.com",
+        "frontendmasters.com"
+      ],
+      "keywords": [
+        "前端",
+        "frontend",
+        "css",
+        "html",
+        "web开发",
+        "响应式"
+      ],
+      "title_patterns": [
+        "[Cc]ss.*",
+        "[Hh]tml.*",
+        "前端.*"
+      ],
+      "folder_keywords": [
+        "前端",
+        "frontend"
+      ]
     },
     "后端开发": {
       "domains": [],
-      "keywords": ["后端", "backend", "api", "rest", "graphql", "服务端"],
-      "title_patterns": ["[Bb]ackend.*", "API.*", "[Rr]EST.*"],
-      "folder_keywords": ["后端", "backend"]
+      "keywords": [
+        "后端",
+        "backend",
+        "api",
+        "rest",
+        "graphql",
+        "服务端"
+      ],
+      "title_patterns": [
+        "[Bb]ackend.*",
+        "API.*",
+        "[Rr]EST.*"
+      ],
+      "folder_keywords": [
+        "后端",
+        "backend"
+      ]
     },
     "DevOps/CI-CD": {
-      "domains": ["jenkins.io", "travis-ci.org", "circleci.com", "github.com/features/actions"],
-      "keywords": ["devops", "ci/cd", "jenkins", "travis", "自动化部署", "continuous integration"],
-      "title_patterns": ["[Dd]evops.*", "[Cc]i.*", "[Cc]d.*"],
-      "folder_keywords": ["devops", "ci", "cd"]
+      "domains": [
+        "jenkins.io",
+        "travis-ci.org",
+        "circleci.com",
+        "github.com/features/actions"
+      ],
+      "keywords": [
+        "devops",
+        "ci/cd",
+        "jenkins",
+        "travis",
+        "自动化部署",
+        "continuous integration"
+      ],
+      "title_patterns": [
+        "[Dd]evops.*",
+        "[Cc]i.*",
+        "[Cc]d.*"
+      ],
+      "folder_keywords": [
+        "devops",
+        "ci",
+        "cd"
+      ]
     },
     "DevOps/监控": {
-      "domains": ["prometheus.io", "grafana.com"],
-      "keywords": ["监控", "monitoring", "prometheus", "grafana", "metrics", "监控告警"],
-      "title_patterns": ["[Pp]rometheus.*", "[Gg]rafana.*", "监控.*"],
-      "folder_keywords": ["监控", "monitoring"]
+      "domains": [
+        "prometheus.io",
+        "grafana.com"
+      ],
+      "keywords": [
+        "监控",
+        "monitoring",
+        "prometheus",
+        "grafana",
+        "metrics",
+        "监控告警"
+      ],
+      "title_patterns": [
+        "[Pp]rometheus.*",
+        "[Gg]rafana.*",
+        "监控.*"
+      ],
+      "folder_keywords": [
+        "监控",
+        "monitoring"
+      ]
     },
     "安全": {
-      "domains": ["owasp.org", "security.googleblog.com"],
-      "keywords": ["安全", "security", "加密", "encryption", "漏洞", "vulnerability", "渗透", "pentest", "openssl"],
-      "title_patterns": ["[Ss]ecurity.*", "安全.*"],
-      "folder_keywords": ["安全", "security", "openssl"]
+      "domains": [
+        "owasp.org",
+        "security.googleblog.com"
+      ],
+      "keywords": [
+        "安全",
+        "security",
+        "加密",
+        "encryption",
+        "漏洞",
+        "vulnerability",
+        "渗透",
+        "pentest",
+        "openssl"
+      ],
+      "title_patterns": [
+        "[Ss]ecurity.*",
+        "安全.*"
+      ],
+      "folder_keywords": [
+        "安全",
+        "security",
+        "openssl"
+      ]
     },
     "算法与数据结构": {
-      "domains": ["leetcode.com", "hackerrank.com", "codeforces.com"],
-      "keywords": ["算法", "algorithm", "数据结构", "data structure", "leetcode", "面试题", "刷题"],
-      "title_patterns": ["[Ll]eetcode.*", "[Aa]lgorithm.*", "算法.*"],
-      "folder_keywords": ["算法", "algorithm", "刷题", "数据结构算法"]
+      "domains": [
+        "leetcode.com",
+        "hackerrank.com",
+        "codeforces.com"
+      ],
+      "keywords": [
+        "算法",
+        "algorithm",
+        "数据结构",
+        "data structure",
+        "leetcode",
+        "面试题",
+        "刷题"
+      ],
+      "title_patterns": [
+        "[Ll]eetcode.*",
+        "[Aa]lgorithm.*",
+        "算法.*"
+      ],
+      "folder_keywords": [
+        "算法",
+        "algorithm",
+        "刷题",
+        "数据结构算法"
+      ]
     },
     "开发工具/IDE": {
-      "domains": ["jetbrains.com", "vscode.com"],
-      "keywords": ["ide", "编辑器", "editor", "vscode", "jetbrains"],
-      "title_patterns": ["[Ii]de.*", "[Vv]scode.*"],
-      "folder_keywords": ["ide", "IDE"]
+      "domains": [
+        "jetbrains.com",
+        "vscode.com"
+      ],
+      "keywords": [
+        "ide",
+        "编辑器",
+        "editor",
+        "vscode",
+        "jetbrains"
+      ],
+      "title_patterns": [
+        "[Ii]de.*",
+        "[Vv]scode.*"
+      ],
+      "folder_keywords": [
+        "ide",
+        "IDE"
+      ]
     },
     "开发工具/Git": {
-      "domains": ["git-scm.com"],
-      "keywords": ["git", "版本控制", "version control"],
-      "title_patterns": ["[Gg]it.*"],
-      "folder_keywords": ["git"]
+      "domains": [
+        "git-scm.com"
+      ],
+      "keywords": [
+        "git",
+        "版本控制",
+        "version control"
+      ],
+      "title_patterns": [
+        "[Gg]it.*"
+      ],
+      "folder_keywords": [
+        "git"
+      ]
     },
     "开发工具/其他": {
-      "domains": ["vim.org"],
-      "keywords": ["vim", "工具", "cmake", "make", "shell"],
-      "title_patterns": ["[Vv]im.*", "[Cc]make.*"],
-      "folder_keywords": ["工具", "vim", "cmake", "shell"]
+      "domains": [
+        "vim.org"
+      ],
+      "keywords": [
+        "vim",
+        "工具",
+        "cmake",
+        "make",
+        "shell"
+      ],
+      "title_patterns": [
+        "[Vv]im.*",
+        "[Cc]make.*"
+      ],
+      "folder_keywords": [
+        "工具",
+        "vim",
+        "cmake",
+        "shell"
+      ]
     },
     "文档与教程": {
-      "domains": ["readthedocs.io", "docs.google.com", "notion.so"],
-      "keywords": ["文档", "document", "教程", "tutorial", "指南", "guide", "手册", "读书"],
-      "title_patterns": ["[Tt]utorial.*", "[Dd]ocumentation.*", "教程.*", "指南.*"],
-      "folder_keywords": ["文档", "教程", "读书"]
+      "domains": [
+        "readthedocs.io",
+        "docs.google.com",
+        "notion.so"
+      ],
+      "keywords": [
+        "文档",
+        "document",
+        "教程",
+        "tutorial",
+        "指南",
+        "guide",
+        "手册",
+        "读书"
+      ],
+      "title_patterns": [
+        "[Tt]utorial.*",
+        "[Dd]ocumentation.*",
+        "教程.*",
+        "指南.*"
+      ],
+      "folder_keywords": [
+        "文档",
+        "教程",
+        "读书"
+      ]
     },
     "测试": {
       "domains": [],
-      "keywords": ["测试", "test", "unit test", "集成测试", "integration test", "mock", "benchmark"],
-      "title_patterns": ["[Tt]est.*", "测试.*", "[Bb]enchmark.*"],
-      "folder_keywords": ["测试", "test", "benchmark", "Benchmark"]
+      "keywords": [
+        "测试",
+        "test",
+        "unit test",
+        "集成测试",
+        "integration test",
+        "mock",
+        "benchmark"
+      ],
+      "title_patterns": [
+        "[Tt]est.*",
+        "测试.*",
+        "[Bb]enchmark.*"
+      ],
+      "folder_keywords": [
+        "测试",
+        "test",
+        "benchmark",
+        "Benchmark"
+      ]
     },
     "Linux系统": {
-      "domains": ["kernel.org", "gnu.org"],
-      "keywords": ["linux", "ubuntu", "centos", "debian", "shell", "bash", "cgroup", "systemd", "gdb", "调试"],
-      "title_patterns": ["[Ll]inux.*", "[Ss]hell.*", "[Gg]db.*"],
-      "folder_keywords": ["linux", "Linux", "shell", "cgroup", "systemd", "GDB", "调试工具"]
+      "domains": [
+        "kernel.org",
+        "gnu.org"
+      ],
+      "keywords": [
+        "linux",
+        "ubuntu",
+        "centos",
+        "debian",
+        "shell",
+        "bash",
+        "cgroup",
+        "systemd",
+        "gdb",
+        "调试"
+      ],
+      "title_patterns": [
+        "[Ll]inux.*",
+        "[Ss]hell.*",
+        "[Gg]db.*"
+      ],
+      "folder_keywords": [
+        "linux",
+        "Linux",
+        "shell",
+        "cgroup",
+        "systemd",
+        "GDB",
+        "调试工具"
+      ]
     },
     "网络编程": {
       "domains": [],
-      "keywords": ["网络", "network", "tcp", "udp", "http", "https", "socket", "rpc"],
-      "title_patterns": ["[Nn]etwork.*", "[Tt]cp.*", "[Hh]ttp.*"],
-      "folder_keywords": ["网络", "network"]
+      "keywords": [
+        "网络",
+        "network",
+        "tcp",
+        "udp",
+        "http",
+        "https",
+        "socket",
+        "rpc"
+      ],
+      "title_patterns": [
+        "[Nn]etwork.*",
+        "[Tt]cp.*",
+        "[Hh]ttp.*"
+      ],
+      "folder_keywords": [
+        "网络",
+        "network"
+      ]
     },
     "操作系统": {
       "domains": [],
-      "keywords": ["操作系统", "operating system", "os", "kernel", "进程", "线程"],
-      "title_patterns": ["[Oo]perating [Ss]ystem.*", "操作系统.*"],
-      "folder_keywords": ["操作系统"]
+      "keywords": [
+        "操作系统",
+        "operating system",
+        "os",
+        "kernel",
+        "进程",
+        "线程"
+      ],
+      "title_patterns": [
+        "[Oo]perating [Ss]ystem.*",
+        "操作系统.*"
+      ],
+      "folder_keywords": [
+        "操作系统"
+      ]
     },
     "论文与研究": {
-      "domains": ["arxiv.org", "acm.org", "ieee.org"],
-      "keywords": ["论文", "paper", "research", "研究", "学术"],
-      "title_patterns": ["[Pp]aper.*", "[Rr]esearch.*", "论文.*"],
-      "folder_keywords": ["论文", "paper", "研究"]
+      "domains": [
+        "arxiv.org",
+        "acm.org",
+        "ieee.org"
+      ],
+      "keywords": [
+        "论文",
+        "paper",
+        "research",
+        "研究",
+        "学术"
+      ],
+      "title_patterns": [
+        "[Pp]aper.*",
+        "[Rr]esearch.*",
+        "论文.*"
+      ],
+      "folder_keywords": [
+        "论文",
+        "paper",
+        "研究"
+      ]
     },
     "配置开发环境": {
       "domains": [],
-      "keywords": ["配置", "环境", "setup", "install", "安装", "部署"],
-      "title_patterns": ["配置.*", "安装.*", "部署.*"],
-      "folder_keywords": ["配置开发环境", "setupTool", "setuptools"]
+      "keywords": [
+        "配置",
+        "环境",
+        "setup",
+        "install",
+        "安装",
+        "部署"
+      ],
+      "title_patterns": [
+        "配置.*",
+        "安装.*",
+        "部署.*"
+      ],
+      "folder_keywords": [
+        "配置开发环境",
+        "setupTool",
+        "setuptools"
+      ]
     },
     "文件格式": {
       "domains": [],
-      "keywords": ["文件格式", "file format", "json", "yaml", "xml", "csv", "protobuf"],
+      "keywords": [
+        "文件格式",
+        "file format",
+        "json",
+        "yaml",
+        "xml",
+        "csv",
+        "protobuf"
+      ],
       "title_patterns": [],
-      "folder_keywords": ["文件类型", "文件格式"]
+      "folder_keywords": [
+        "文件类型",
+        "文件格式"
+      ]
     },
     "公司资源": {
       "domains": [],
       "keywords": [],
       "title_patterns": [],
-      "folder_keywords": ["公司网站", "腾讯文档", "书签项目"]
+      "folder_keywords": [
+        "公司网站",
+        "腾讯文档",
+        "书签项目"
+      ]
     },
     "实验项目": {
       "domains": [],
-      "keywords": ["实验", "lab", "demo", "示例"],
-      "title_patterns": ["[Ll]ab.*", "实验.*"],
-      "folder_keywords": ["lab", "LAB", "实验"]
+      "keywords": [
+        "实验",
+        "lab",
+        "demo",
+        "示例"
+      ],
+      "title_patterns": [
+        "[Ll]ab.*",
+        "实验.*"
+      ],
+      "folder_keywords": [
+        "lab",
+        "LAB",
+        "实验"
+      ]
     }
   },
   "default_category": "其他/未分类",
@@ -237,5 +887,263 @@
     "content_weight": 5,
     "min_score": 15,
     "confirm_threshold": 25
+  },
+  "resource_type_rules": {
+    "文档": {
+      "domains": [
+        "readthedocs.io",
+        "developer.mozilla.org",
+        "docs.python.org",
+        "docs.rs",
+        "kubernetes.io"
+      ],
+      "url_patterns": [
+        "/docs",
+        "/doc/",
+        "/reference",
+        "/manual",
+        "/guide",
+        "/learn"
+      ],
+      "keywords": [
+        "documentation",
+        "docs",
+        "reference",
+        "文档",
+        "手册",
+        "官方文档"
+      ],
+      "title_patterns": [
+        "[Dd]ocumentation",
+        "[Rr]eference",
+        "文档",
+        "手册"
+      ]
+    },
+    "博客": {
+      "domains": [
+        "medium.com",
+        "juejin.cn",
+        "segmentfault.com",
+        "csdn.net",
+        "cnblogs.com",
+        "infoq.cn",
+        "dev.to"
+      ],
+      "url_patterns": [
+        "/blog",
+        "/posts",
+        "/article"
+      ],
+      "keywords": [
+        "blog",
+        "博客",
+        "article",
+        "文章"
+      ],
+      "title_patterns": [
+        "[Bb]log",
+        "博客",
+        "文章"
+      ]
+    },
+    "教程": {
+      "domains": [],
+      "url_patterns": [
+        "/tutorial",
+        "/getting-started",
+        "/quickstart",
+        "/how-to"
+      ],
+      "keywords": [
+        "tutorial",
+        "教程",
+        "quickstart",
+        "getting started",
+        "入门",
+        "实践"
+      ],
+      "title_patterns": [
+        "[Tt]utorial",
+        "教程",
+        "入门",
+        "Quickstart"
+      ]
+    },
+    "产品": {
+      "domains": [],
+      "url_patterns": [
+        "/pricing",
+        "/product",
+        "/features"
+      ],
+      "keywords": [
+        "product",
+        "产品",
+        "pricing",
+        "features",
+        "platform"
+      ],
+      "title_patterns": [
+        "[Pp]ricing",
+        "[Pp]roduct",
+        "产品"
+      ]
+    },
+    "仓库": {
+      "domains": [
+        "github.com",
+        "gitlab.com",
+        "gitee.com",
+        "bitbucket.org"
+      ],
+      "url_patterns": [
+        "/.+/.+"
+      ],
+      "keywords": [
+        "repository",
+        "repo",
+        "仓库",
+        "source code"
+      ],
+      "title_patterns": [
+        "GitHub",
+        "GitLab"
+      ]
+    },
+    "工具": {
+      "domains": [],
+      "url_patterns": [
+        "/download",
+        "/cli"
+      ],
+      "keywords": [
+        "tool",
+        "工具",
+        "cli",
+        "plugin",
+        "extension"
+      ],
+      "title_patterns": [
+        "[Tt]ool",
+        "工具",
+        "CLI"
+      ]
+    },
+    "论文": {
+      "domains": [
+        "arxiv.org",
+        "acm.org",
+        "ieee.org"
+      ],
+      "url_patterns": [
+        "/abs/",
+        "/pdf/"
+      ],
+      "keywords": [
+        "paper",
+        "论文",
+        "research",
+        "preprint"
+      ],
+      "title_patterns": [
+        "[Pp]aper",
+        "论文",
+        "[Rr]esearch"
+      ]
+    }
+  },
+  "intent_rules": {
+    "学习": [
+      "tutorial",
+      "教程",
+      "入门",
+      "guide",
+      "learn",
+      "课程"
+    ],
+    "参考": [
+      "reference",
+      "documentation",
+      "文档",
+      "手册",
+      "api"
+    ],
+    "工作": [
+      "architecture",
+      "design",
+      "最佳实践",
+      "production",
+      "workflow"
+    ],
+    "下载": [
+      "download",
+      "release",
+      "安装",
+      "setup"
+    ],
+    "运维": [
+      "deploy",
+      "deployment",
+      "ops",
+      "运维",
+      "monitoring",
+      "kubernetes",
+      "docker"
+    ],
+    "排障": [
+      "troubleshoot",
+      "debug",
+      "debugging",
+      "faq",
+      "error",
+      "故障",
+      "排查"
+    ]
+  },
+  "quality_signal_rules": {
+    "官方": {
+      "domains": [
+        "python.org",
+        "postgresql.org",
+        "kubernetes.io",
+        "go.dev",
+        "rust-lang.org",
+        "docker.com",
+        "docs.pingcap.com"
+      ],
+      "keywords": [
+        "official",
+        "官方"
+      ]
+    },
+    "社区": {
+      "domains": [
+        "medium.com",
+        "juejin.cn",
+        "segmentfault.com",
+        "csdn.net",
+        "cnblogs.com",
+        "dev.to"
+      ],
+      "keywords": [
+        "community",
+        "社区"
+      ]
+    }
+  },
+  "dynamic_topic_rules": {
+    "allow_short_tokens": [
+      "ai",
+      "db",
+      "llm",
+      "api",
+      "sdk",
+      "cli",
+      "aws",
+      "gcp",
+      "k8s"
+    ],
+    "max_candidates": 8
   }
 }
