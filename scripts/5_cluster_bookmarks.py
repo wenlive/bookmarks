@@ -152,14 +152,16 @@ class BookmarkClusterer:
         if category:
             topics.update(self.extract_keywords(category.replace("/", " ")))
         all_scores = classification.get("all_scores", {})
-        top_scores = sorted(all_scores.items(), key=lambda item: item[1].get("total", 0), reverse=True)[:2]
+        top_scores = sorted(all_scores.items(), key=lambda item: (-item[1].get("total", 0), item[0]))[:2]
         for category_name, _ in top_scores:
             topics.update(self.extract_keywords(category_name.replace("/", " ")))
-        candidates = list(title_tokens) + list(folder_tokens) + list(path_tokens)
+        candidates = sorted(title_tokens) + sorted(folder_tokens) + sorted(path_tokens)
         topical_tokens = [token for token in candidates if token not in URL_TYPE_HINTS and token not in STOPWORDS]
         if topical_tokens:
-            topics.update(token for token, _ in Counter(topical_tokens).most_common(4))
-        primary = next(iter(top_scores), (category,))[0] if top_scores else category
+            topical_counter = Counter(topical_tokens)
+            stable_topical_tokens = sorted(topical_counter.items(), key=lambda item: (-item[1], item[0]))[:4]
+            topics.update(token for token, _ in stable_topical_tokens)
+        primary = top_scores[0][0] if top_scores else category
         return topics, primary or "其他/未分类"
 
     def build_feature_set(self, bookmark: dict) -> BookmarkFeatures:
@@ -498,6 +500,15 @@ class BookmarkClusterer:
             parts.append("站点分布参考 " + ", ".join(name for name, _ in registered))
         return "；".join(parts) or "基于综合特征相似度聚类"
 
+    @staticmethod
+    def _unique_subcategory_name(subcategories: Dict[str, Dict], base_name: str) -> str:
+        if base_name not in subcategories:
+            return base_name
+        suffix = 2
+        while f"{base_name} ({suffix})" in subcategories:
+            suffix += 1
+        return f"{base_name} ({suffix})"
+
     def _fallback_clusters(self, bookmarks: List[dict], category: str) -> Dict:
         domain_clusters = self.cluster_by_domain(bookmarks)
         if len(domain_clusters) > 1:
@@ -567,6 +578,7 @@ class BookmarkClusterer:
                 subcategory_name = f"{category}/{display_name}"
             else:
                 subcategory_name = label if "/" in label else f"{category}/{label}"
+            subcategory_name = self._unique_subcategory_name(subcategories, subcategory_name)
             subcategories[subcategory_name] = {
                 "bookmarks": cluster,
                 "count": len(cluster),
@@ -637,10 +649,16 @@ def main() -> int:
         category_bucket["count"] += len(cluster)
         built = clusterer.build_hierarchy(cluster, cluster_category, threshold=options.get("max_bookmarks_without_clustering", 20))
         if built.get("subcategories"):
-            category_bucket["subcategories"].update(built["subcategories"])
+            for name, item in built["subcategories"].items():
+                unique_name = clusterer._unique_subcategory_name(category_bucket["subcategories"], name)
+                category_bucket["subcategories"][unique_name] = item
             category_bucket["bookmarks"].extend(built.get("bookmarks", []))
         else:
-            category_bucket["bookmarks"].extend(cluster)
+            unique_name = clusterer._unique_subcategory_name(category_bucket["subcategories"], built["category"])
+            category_bucket["subcategories"][unique_name] = {
+                **built,
+                "category": unique_name,
+            }
 
     output = {
         "hierarchy": hierarchy,
