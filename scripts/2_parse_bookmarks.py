@@ -1,139 +1,143 @@
 #!/usr/bin/env python3
-"""步骤2: 解析Chrome书签HTML文件（支持深度嵌套 - 使用html.parser）"""
-import json
+"""步骤2: 解析 Chrome 书签 HTML 文件。"""
+from __future__ import annotations
+
 import hashlib
-from pathlib import Path
-from bs4 import BeautifulSoup
-from urllib.parse import urlparse
+import json
 from collections import defaultdict
+from pathlib import Path
+from urllib.parse import urlparse
+
+from bs4 import BeautifulSoup
+
+from common import build_parser, configure_logging, ensure_parent, load_config_from_args
+
+
+IGNORED_FOLDERS = {"书签栏", "Bookmarks Bar", "Bookmarks bar", "其他书签", "Other Bookmarks"}
 
 
 def parse_bookmarks(html_file: Path) -> dict:
-    """解析Chrome书签HTML文件，支持深度嵌套"""
-    with open(html_file, 'r', encoding='utf-8') as f:
-        content = f.read()
-
-    # 使用html.parser而不是lxml，因为html.parser对Chrome书签格式更友好
-    soup = BeautifulSoup(content, 'html.parser')
+    content = html_file.read_text(encoding="utf-8")
+    soup = BeautifulSoup(content, "html.parser")
 
     bookmarks = []
     seen_urls = set()
     bookmark_id = 0
     all_folders = set()
+    duplicates = []
 
     def get_url_hash(url: str) -> str:
-        """生成URL的hash用于去重"""
-        return hashlib.md5(url.encode()).hexdigest()
+        return hashlib.md5(url.encode("utf-8")).hexdigest()
 
-    def get_folder_path(a_tag):
-        """通过向上遍历获取书签的完整文件夹路径"""
+    def get_folder_path(a_tag) -> list[str]:
         path = []
         current = a_tag.parent
-
         while current:
-            # 查找最近的H3祖先（在同一DT或祖先DT中）
-            if current.name == 'dt':
-                h3 = current.find('h3', recursive=False)
+            if current.name == "dt":
+                h3 = current.find("h3", recursive=False)
                 if h3:
                     folder_name = h3.get_text(strip=True)
-                    if folder_name and folder_name not in ['书签栏', 'Bookmarks Bar', 'Bookmarks bar', '其他书签', 'Other Bookmarks']:
+                    if folder_name and folder_name not in IGNORED_FOLDERS:
                         path.insert(0, folder_name)
-                        all_folders.add('/'.join(path))
-
+                        all_folders.add("/".join(path))
             current = current.parent
-
         return path
 
-    # 找到所有书签链接
-    all_links = soup.find_all('a')
-    print(f"找到 {len(all_links)} 个链接标签")
-
-    for a in all_links:
-        url = a.get('href', '')
-        if not url or url.startswith('javascript:'):
+    for a in soup.find_all("a"):
+        url = a.get("href", "")
+        if not url or url.startswith("javascript:"):
             continue
 
-        # URL去重
         url_hash = get_url_hash(url)
         if url_hash in seen_urls:
+            duplicates.append({"url": url, "name": a.get_text(strip=True)})
             continue
         seen_urls.add(url_hash)
 
-        # 提取域名
         try:
             domain = urlparse(url).netloc
-        except:
-            domain = ''
+        except ValueError:
+            domain = ""
 
-        # 获取文件夹路径
-        folder_path = get_folder_path(a)
-
-        bookmark = {
-            "id": f"bookmark_{bookmark_id}",
-            "name": a.get_text(strip=True),
-            "url": url,
-            "domain": domain,
-            "original_folder_path": folder_path,
-            "add_date": a.get('add_date', ''),
-            "icon": a.get('icon', ''),
-            "metadata": {}
-        }
-        bookmarks.append(bookmark)
+        bookmarks.append(
+            {
+                "id": f"bookmark_{bookmark_id}",
+                "name": a.get_text(strip=True),
+                "url": url,
+                "domain": domain,
+                "original_folder_path": get_folder_path(a),
+                "add_date": a.get("add_date", ""),
+                "icon": a.get("icon", ""),
+                "metadata": {},
+            }
+        )
         bookmark_id += 1
 
-    # 统计信息
     domain_stats = defaultdict(int)
     folder_stats = defaultdict(int)
-
-    for bm in bookmarks:
-        if bm['domain']:
-            domain_stats[bm['domain']] += 1
-        folder_path = '/'.join(bm['original_folder_path'])
+    for bookmark in bookmarks:
+        if bookmark["domain"]:
+            domain_stats[bookmark["domain"]] += 1
+        folder_path = "/".join(bookmark["original_folder_path"])
         if folder_path:
             folder_stats[folder_path] += 1
 
-    result = {
+    return {
         "bookmarks": bookmarks,
         "stats": {
             "total_bookmarks": len(bookmarks),
+            "duplicate_count": len(duplicates),
+            "duplicates": duplicates[:100],
             "total_folders": len(all_folders),
             "unique_domains": len(domain_stats),
-            "top_domains": dict(sorted(domain_stats.items(), key=lambda x: x[1], reverse=True)[:20]),
-            "top_folders": dict(sorted(folder_stats.items(), key=lambda x: x[1], reverse=True)[:20]),
-            "all_folders": sorted(list(all_folders))
-        }
+            "top_domains": dict(sorted(domain_stats.items(), key=lambda item: item[1], reverse=True)[:20]),
+            "top_folders": dict(sorted(folder_stats.items(), key=lambda item: item[1], reverse=True)[:20]),
+            "all_folders": sorted(all_folders),
+        },
     }
 
-    return result
+
+def export_duplicate_report(result: dict, report_file: Path) -> None:
+    ensure_parent(report_file)
+    report = {
+        "count": result["stats"]["duplicate_count"],
+        "duplicates": result["stats"]["duplicates"],
+    }
+    report_file.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def main():
-    input_file = Path("/Users/lipoqi/data/playground/bookmarks/data/bookmarks_2026_3_4.html")
-    output_file = Path("/Users/lipoqi/data/playground/bookmarks/data/parsed_bookmarks.json")
+def main() -> int:
+    parser = build_parser("解析 Chrome 书签 HTML")
+    parser.add_argument("--input", type=Path, default=None, help="输入 HTML 文件")
+    parser.add_argument("--output", type=Path, default=None, help="输出解析 JSON 文件")
+    parser.add_argument("--duplicate-report", type=Path, default=None, help="重复 URL 报告输出路径")
+    args = parser.parse_args()
+
+    config = load_config_from_args(args)
+    logger = configure_logging(config, args.log_level)
+
+    input_file = args.input or config.paths.copied_bookmark_file
+    output_file = args.output or config.paths.parsed_file
+    duplicate_report_file = args.duplicate_report or config.paths.duplicate_report_file
 
     if not input_file.exists():
+        logger.error("输入文件不存在: %s", input_file)
         print(f"错误: 输入文件不存在: {input_file}")
-        return
+        return 1
 
-    print("正在解析书签文件...")
     result = parse_bookmarks(input_file)
+    ensure_parent(output_file)
+    output_file.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    export_duplicate_report(result, duplicate_report_file)
 
-    # 保存结果
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_file, 'w', encoding='utf-8') as f:
-        json.dump(result, f, ensure_ascii=False, indent=2)
-
-    print(f"\n✓ 解析完成: {output_file}")
+    logger.info("步骤2完成: %s -> %s", input_file, output_file)
+    print(f"✓ 解析完成: {output_file}")
     print(f"  总书签数: {result['stats']['total_bookmarks']}")
-    print(f"  总文件夹数: {result['stats']['total_folders']}")
+    print(f"  重复 URL 数: {result['stats']['duplicate_count']}")
+    print(f"  重复 URL 报告: {duplicate_report_file}")
     print(f"  唯一域名数: {result['stats']['unique_domains']}")
-    print(f"\n前10个域名:")
-    for domain, count in list(result['stats']['top_domains'].items())[:10]:
-        print(f"  {domain}: {count}")
-    print(f"\n前15个文件夹:")
-    for folder, count in list(result['stats']['top_folders'].items())[:15]:
-        print(f"  {folder}: {count}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

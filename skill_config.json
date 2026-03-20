@@ -3,10 +3,18 @@
     "bookmark_file": "data/bookmarks.html",
     "rules_file": "data/category_rules.json"
   },
+  "pipeline": {
+    "copied_bookmark_file": "data/bookmarks.html",
+    "parsed_file": "data/parsed_bookmarks.json",
+    "classified_file": "data/classified_bookmarks.json",
+    "clustering_file": "data/clustering_result.json"
+  },
   "output": {
-    "directory": "output",
-    "prefix": "organized",
-    "filename_template": "organized_bookmarks_{timestamp}.html"
+    "html_file": "output/organized_bookmarks.html",
+    "reports_directory": "output/reports",
+    "duplicate_report_file": "output/reports/duplicates.json",
+    "broken_links_report_file": "output/reports/broken_links.json",
+    "confirmation_report_file": "output/reports/needs_confirmation.json"
   },
   "fetch_options": {
     "concurrent_limit": 15,
@@ -14,24 +22,24 @@
     "delay": 0.8,
     "batch_size": 50,
     "max_retries": 2,
-    "use_cache": true,
-    "cache_file": "data/bookmarks_with_info.json"
+    "cache_file": "data/bookmarks_with_info.json",
+    "check_broken_links": true,
+    "user_agent": "BookmarksOrganizer/1.1 (+https://example.com)"
   },
   "classification_options": {
     "min_score": 15,
     "confirm_threshold": 25,
     "domain_weight": 30,
     "keyword_weight": 40,
+    "title_weight": 20,
     "folder_weight": 25,
     "content_weight": 5
   },
   "clustering_options": {
     "min_cluster_size": 10,
-    "use_domain_clustering": true,
-    "use_keyword_clustering": true,
+    "max_keywords": 3,
     "max_bookmarks_without_clustering": 20
   },
-  "skip_steps": [],
   "logging": {
     "level": "INFO",
     "file": "logs/bookmarks_organizer.log",
