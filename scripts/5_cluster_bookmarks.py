@@ -326,8 +326,12 @@ class BookmarkClusterer:
 
         while len(node["children"]) == 1 and not node.get("bookmarks") and not is_root:
             only_child = node["children"][0]
+            current_type = node.get("node_type", "mixed")
+            child_type = only_child.get("node_type", current_type)
+            if current_type == "reference" and child_type != "reference":
+                break
             node["name"] = only_child["name"]
-            node["node_type"] = only_child.get("node_type", node.get("node_type", "mixed"))
+            node["node_type"] = child_type
             node["children"] = only_child.get("children", [])
             node["bookmarks"] = only_child.get("bookmarks", [])
 

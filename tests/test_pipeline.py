@@ -184,7 +184,6 @@ def test_optimize_tree_collapses_single_child_and_merges_others():
     assert optimized["children"][0]["name"] == "Only Grandchild"
     assert any(bookmark["name"] == "Tiny Link" for bookmark in optimized["bookmarks"])
 
-
 def test_rich_feature_clustering_groups_cross_domain_same_topic():
     clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2)
     bookmarks = [
@@ -241,6 +240,33 @@ def test_high_quality_folder_reused_and_low_quality_folder_split():
     for item in low_hierarchy["subcategories"].values():
         assert item["source_folder_reused"] is False
         assert item["source_folder_quality_score"] < 0.68 or item["count"] == 1
+
+
+def test_optimize_tree_preserves_reference_folder_when_only_child_is_topic():
+    clusterer = cluster_module.BookmarkClusterer(min_cluster_size=3, merge_small_nodes_threshold=2)
+    node = {
+        "name": "编程语言/Python · docs.python.org",
+        "node_type": "reference",
+        "bookmarks": [],
+        "children": [
+            {
+                "name": "fastapi",
+                "node_type": "topic",
+                "bookmarks": [
+                    {"name": "FastAPI Docs", "url": "https://docs.python.org/fastapi"},
+                ],
+                "children": [],
+                "count": 1,
+            }
+        ],
+        "count": 1,
+    }
+
+    optimized = clusterer.optimize_tree(node)
+
+    assert optimized["name"] == "编程语言/Python · docs.python.org"
+    assert optimized["node_type"] == "reference"
+    assert optimized["children"][0]["name"] == "fastapi"
 
 
 def test_config_paths_are_resolved_relative_to_config_file(tmp_path):
