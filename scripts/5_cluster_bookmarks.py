@@ -106,9 +106,19 @@ class DisjointSet:
 
 
 class BookmarkClusterer:
-    def __init__(self, min_cluster_size: int = 10, max_keywords: int = 3):
+    def __init__(
+        self,
+        min_cluster_size: int = 10,
+        max_keywords: int = 3,
+        max_depth: int = 3,
+        merge_small_nodes_threshold: int | None = None,
+        domain_split_min_size: int = 5,
+    ):
         self.min_cluster_size = min_cluster_size
         self.max_keywords = max_keywords
+        self.max_depth = max_depth
+        self.merge_small_nodes_threshold = merge_small_nodes_threshold or max(2, min_cluster_size // 2)
+        self.domain_split_min_size = domain_split_min_size
 
     @staticmethod
     def _normalize_resource_type(value: str) -> str:
@@ -243,6 +253,83 @@ class BookmarkClusterer:
         if metrics["topic_overlap"] < 0.2 and metrics["text_similarity"] < 0.15:
             score *= 0.6
         return score
+
+    @staticmethod
+    def normalize_name(name: str) -> str:
+        cleaned = re.sub(r"[_\-/]+", " ", (name or "").strip().lower())
+        cleaned = re.sub(r"\s+", " ", cleaned)
+        return cleaned or "其他"
+
+    def clean_topic_token(self, token: str) -> str:
+        cleaned = re.sub(r"[_/]+", " ", token or "")
+        cleaned = re.sub(r"[^\w\s\u4e00-\u9fff.-]", " ", cleaned).strip()
+        cleaned = re.sub(r"\s+", " ", cleaned)
+        parts = []
+        seen = set()
+        for part in cleaned.split():
+            key = part.lower()
+            if key in STOPWORDS or key in seen:
+                continue
+            seen.add(key)
+            parts.append(part)
+        return " ".join(parts) or "其他"
+
+    def make_node(self, name: str, *, node_type: str = "mixed", children: List[dict] | None = None, bookmarks: List[dict] | None = None) -> dict:
+        node = {
+            "name": name,
+            "children": children or [],
+            "bookmarks": bookmarks or [],
+            "count": 0,
+            "node_type": node_type,
+        }
+        return self.refresh_count(node)
+
+    def refresh_count(self, node: dict) -> dict:
+        node["count"] = len(node.get("bookmarks", [])) + sum(child.get("count", 0) for child in node.get("children", []))
+        return node
+
+    def optimize_tree(self, node: dict, *, is_root: bool = False) -> dict:
+        optimized_children = [self.optimize_tree(child) for child in node.get("children", []) if child.get("count", 0) > 0]
+        merged_children: dict[str, dict] = {}
+        for child in optimized_children:
+            key = self.normalize_name(child["name"])
+            existing = merged_children.get(key)
+            if existing is None:
+                merged_children[key] = child
+                continue
+            existing["bookmarks"].extend(child.get("bookmarks", []))
+            existing["children"].extend(child.get("children", []))
+            existing["node_type"] = existing["node_type"] if existing["node_type"] == child.get("node_type") else "mixed"
+            self.refresh_count(existing)
+
+        node["children"] = sorted(merged_children.values(), key=lambda item: (-item["count"], item["name"]))
+
+        low_value_bookmarks = []
+        retained_children = []
+        low_value_children = [
+            child for child in node["children"]
+            if child["count"] <= self.merge_small_nodes_threshold and not child.get("children")
+        ]
+        protected_child = low_value_children[0] if len(low_value_children) == len(node["children"]) and low_value_children else None
+        for child in node["children"]:
+            if child is protected_child:
+                retained_children.append(child)
+            elif child["count"] <= self.merge_small_nodes_threshold and not child.get("children"):
+                low_value_bookmarks.extend(child.get("bookmarks", []))
+            else:
+                retained_children.append(child)
+        node["children"] = retained_children
+        if low_value_bookmarks:
+            node.setdefault("bookmarks", []).extend(low_value_bookmarks)
+
+        while len(node["children"]) == 1 and not node.get("bookmarks") and not is_root:
+            only_child = node["children"][0]
+            node["name"] = only_child["name"]
+            node["node_type"] = only_child.get("node_type", node.get("node_type", "mixed"))
+            node["children"] = only_child.get("children", [])
+            node["bookmarks"] = only_child.get("bookmarks", [])
+
+        return self.refresh_count(node)
 
     def cluster_by_keywords(self, bookmarks: List[dict]) -> Dict[str, List[dict]]:
         keyword_groups = defaultdict(list)
@@ -526,6 +613,9 @@ def main() -> int:
     clusterer = BookmarkClusterer(
         min_cluster_size=options.get("min_cluster_size", 10),
         max_keywords=options.get("max_keywords", 3),
+        max_depth=options.get("max_depth", 3),
+        merge_small_nodes_threshold=options.get("merge_small_nodes_threshold"),
+        domain_split_min_size=options.get("domain_split_min_size", 5),
     )
 
     hierarchy_clusters = clusterer._connected_components(

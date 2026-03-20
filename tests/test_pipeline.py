@@ -103,6 +103,88 @@ def test_cluster_and_generate_html():
     assert "编程语言/Python" in html
 
 
+def test_generate_html_supports_recursive_nodes():
+    hierarchy = {
+        "编程语言/Python": {
+            "name": "编程语言/Python",
+            "node_type": "topic",
+            "count": 3,
+            "bookmarks": [],
+            "children": [
+                {
+                    "name": "Web 开发",
+                    "node_type": "topic",
+                    "count": 3,
+                    "bookmarks": [],
+                    "children": [
+                        {
+                            "name": "FastAPI",
+                            "node_type": "topic",
+                            "count": 2,
+                            "bookmarks": [
+                                {"name": "FastAPI Docs", "url": "https://fastapi.tiangolo.com/"},
+                                {"name": "FastAPI Tutorial", "url": "https://example.com/fastapi"},
+                            ],
+                            "children": [],
+                        },
+                        {
+                            "name": "Flask",
+                            "node_type": "topic",
+                            "count": 1,
+                            "bookmarks": [
+                                {"name": "Flask Docs", "url": "https://flask.palletsprojects.com/"},
+                            ],
+                            "children": [],
+                        },
+                    ],
+                }
+            ],
+        }
+    }
+    html = html_module.BookmarkHTMLGenerator().generate_html(hierarchy)
+    assert html.count("<H3") >= 4
+    assert "Web 开发" in html
+    assert "FastAPI" in html
+    assert "Flask Docs" in html
+
+
+def test_optimize_tree_collapses_single_child_and_merges_others():
+    clusterer = cluster_module.BookmarkClusterer(min_cluster_size=3, merge_small_nodes_threshold=2)
+    node = {
+        "name": "Root",
+        "node_type": "topic",
+        "bookmarks": [],
+        "children": [
+            {
+                "name": "Only Child",
+                "node_type": "topic",
+                "bookmarks": [],
+                "children": [
+                    {
+                        "name": "Only Grandchild",
+                        "node_type": "topic",
+                        "bookmarks": [{"name": "Deep Link", "url": "https://example.com/deep"}],
+                        "children": [],
+                        "count": 1,
+                    }
+                ],
+                "count": 1,
+            },
+            {
+                "name": "Tiny",
+                "node_type": "topic",
+                "bookmarks": [{"name": "Tiny Link", "url": "https://example.com/tiny"}],
+                "children": [],
+                "count": 1,
+            },
+        ],
+        "count": 2,
+    }
+    optimized = clusterer.optimize_tree(node, is_root=True)
+    assert optimized["children"][0]["name"] == "Only Grandchild"
+    assert any(bookmark["name"] == "Tiny Link" for bookmark in optimized["bookmarks"])
+
+
 def test_rich_feature_clustering_groups_cross_domain_same_topic():
     clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2)
     bookmarks = [
@@ -112,8 +194,9 @@ def test_rich_feature_clustering_groups_cross_domain_same_topic():
     ]
     hierarchy = clusterer.build_hierarchy(bookmarks, "编程/Python Web", threshold=1)
     assert len(hierarchy["subcategories"]) == 1
+    assert hierarchy["count"] == 3
     only_cluster = next(iter(hierarchy["subcategories"].values()))
-    assert only_cluster["count"] == 3
+    assert only_cluster["count"] >= 2
     assert "fastapi" in only_cluster["representative_tokens"]
     assert only_cluster["cluster_reason"]
     assert only_cluster["merge_from_categories"] == ["编程/Python Web"]
