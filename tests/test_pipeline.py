@@ -1,4 +1,5 @@
 import json
+import asyncio
 import subprocess
 import sys
 from pathlib import Path
@@ -146,6 +147,143 @@ def test_generate_html_supports_recursive_nodes():
     assert "Web 开发" in html
     assert "FastAPI" in html
     assert "Flask Docs" in html
+
+
+def test_fetch_normalize_metadata_classifies_review_categories():
+    timeout_md = fetch_module.normalize_metadata({"fetch_status": "timeout", "error": "Request timeout"})
+    assert timeout_md["link_health"]["reason_label"] == "访问超时"
+
+    cert_md = fetch_module.normalize_metadata(
+        {
+            "fetch_status": "error",
+            "error": "Cannot connect to host learn.pingcap.com:443 ssl:True [SSLCertVerificationError: certificate verify failed: Hostname mismatch]",
+        }
+    )
+    assert cert_md["link_health"]["reason_label"] == "证书异常"
+
+    dns_md = fetch_module.normalize_metadata(
+        {
+            "fetch_status": "error",
+            "error": "Cannot connect to host book.tidb.io:443 ssl:default [nodename nor servname provided, or not known]",
+        }
+    )
+    assert dns_md["link_health"]["reason_label"] == "DNS/连接失败"
+
+    broken_md = fetch_module.normalize_metadata({"fetch_status": "broken", "status_code": 404, "error": "HTTP 404"})
+    assert broken_md["link_health"]["reason_label"] == "HTTP 4xx/5xx"
+
+
+def test_fetch_step_reuses_successful_cache_and_retries_failures(tmp_path):
+    input_file = tmp_path / "parsed.json"
+    output_file = tmp_path / "enriched.json"
+    input_bookmarks = {
+        "bookmarks": [
+            {"id": "a", "name": "A", "url": "https://example.com/a", "domain": "example.com", "original_folder_path": ["A"]},
+            {"id": "b", "name": "B", "url": "https://example.com/b", "domain": "example.com", "original_folder_path": ["B"]},
+        ]
+    }
+    input_file.write_text(json.dumps(input_bookmarks, ensure_ascii=False), encoding="utf-8")
+    cached = {
+        "bookmarks": [
+            {
+                "id": "a",
+                "name": "A",
+                "url": "https://example.com/a",
+                "domain": "example.com",
+                "original_folder_path": ["A"],
+                "metadata": build_metadata("Cached", "", "", "Cached", "Cached"),
+            },
+            {
+                "id": "b",
+                "name": "B",
+                "url": "https://example.com/b",
+                "domain": "example.com",
+                "original_folder_path": ["B"],
+                "metadata": fetch_module.normalize_metadata({"fetch_status": "timeout", "error": "Request timeout"}),
+            },
+        ]
+    }
+    output_file.write_text(json.dumps(cached, ensure_ascii=False), encoding="utf-8")
+
+    calls = []
+
+    async def fake_process_batch(bookmarks, session, timeout, max_retries, proxy_options):
+        calls.extend(bookmark["id"] for bookmark in bookmarks)
+        return [
+            {
+                **bookmark,
+                "metadata": build_metadata("Fetched", "", "", "Fetched", "Fetched"),
+            }
+            for bookmark in bookmarks
+        ]
+
+    original = fetch_module.process_batch
+    fetch_module.process_batch = fake_process_batch
+    try:
+        result = asyncio.run(
+            fetch_module.fetch_webpage_info_async(
+                input_file,
+                output_file,
+                {
+                    "concurrent_limit": 5,
+                    "timeout": 1,
+                    "delay": 0,
+                    "batch_size": 10,
+                    "max_retries": 0,
+                    "force_refetch": False,
+                    "user_agent": "test-agent",
+                    "proxy": {"enabled": False, "trust_env": False, "http_proxy": None, "https_proxy": None, "all_proxy": None},
+                },
+                common_module.configure_logging(common_module.PipelineConfig.load(ROOT / "skill_config.json"), "INFO"),
+            )
+        )
+    finally:
+        fetch_module.process_batch = original
+
+    assert calls == ["b"]
+    assert result["stats"]["reused_count"] == 1
+    assert result["stats"]["retried_count"] == 1
+    assert result["bookmarks"][0]["metadata"]["title"] == "Cached"
+    assert result["bookmarks"][1]["metadata"]["title"] == "Fetched"
+
+
+def test_cluster_and_generate_html_include_review_hierarchy():
+    bookmark = {
+        "id": "broken_1",
+        "name": "Broken Link",
+        "url": "https://broken.example.com",
+        "domain": "broken.example.com",
+        "original_folder_path": ["Ops"],
+        "metadata": fetch_module.normalize_metadata({"fetch_status": "broken", "status_code": 404, "error": "HTTP 404"}),
+        "classification": {
+            "category": "运维/工具",
+            "all_scores": {"运维/工具": {"total": 88}},
+            "review_required": True,
+            "review_category": "HTTP 4xx/5xx",
+        },
+    }
+    clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2)
+    hierarchy = clusterer.build_hierarchy([bookmark], "运维/工具", threshold=5)
+    payload = {
+        "hierarchy": {"运维/工具": hierarchy},
+        "review_hierarchy": {
+            "待审阅": {
+                "category": "待审阅",
+                "subcategories": {
+                    "待审阅/HTTP 4xx/5xx": {
+                        "bookmarks": [bookmark],
+                        "count": 1,
+                    }
+                },
+                "bookmarks": [],
+                "count": 1,
+            }
+        },
+    }
+    html = html_module.BookmarkHTMLGenerator().generate_html(payload["hierarchy"], payload["review_hierarchy"])
+    assert "待审阅" in html
+    assert "HTTP 4xx/5xx" in html
+    assert "Broken Link" in html
 
 
 def test_optimize_tree_collapses_single_child_and_merges_others():
@@ -370,7 +508,15 @@ def test_fetch_with_site_profile_and_homepage_enrichment():
         homepage_url: FakeResponse(200, homepage_url, homepage_html),
     })
 
-    metadata = fetch_module.asyncio.run(fetch_module.fetch_with_aiohttp(session, deep_url, timeout=3, max_retries=0))
+    metadata = fetch_module.asyncio.run(
+        fetch_module.fetch_with_aiohttp(
+            session,
+            deep_url,
+            timeout=3,
+            max_retries=0,
+            proxy_options={"enabled": False, "trust_env": False, "http_proxy": None, "https_proxy": None, "all_proxy": None},
+        )
+    )
 
     assert metadata["fetch_status"] == "success"
     assert metadata["page_signals"]["canonical_url"] == "https://docs.example.com/canonical/ref"
@@ -591,7 +737,7 @@ def test_topic_collection_is_deterministic_for_same_inputs():
     assert features[0].primary_topic == "编程/Python Web"
 
 
-def test_same_label_clusters_get_unique_subcategory_names():
+def test_same_label_clusters_are_merged_instead_of_suffix_spam():
     clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2)
     clusterer._connected_components = lambda bookmarks, features, threshold=0.34: [bookmarks[:2], bookmarks[2:]]
     clusterer._split_if_needed = lambda clusters: clusters
@@ -604,45 +750,27 @@ def test_same_label_clusters_get_unique_subcategory_names():
     ]
     hierarchy = clusterer.build_hierarchy(bookmarks, "编程/Python Web", threshold=1)
     names = sorted(hierarchy["subcategories"].keys())
-    assert len(names) == 2
-    assert len(set(names)) == 2
-    assert names[0] == "编程/Python Web/学习/FastAPI"
-    assert names[1] == "编程/Python Web/学习/FastAPI (2)"
+    assert names == ["编程/Python Web/学习/FastAPI"]
+    assert hierarchy["subcategories"][names[0]]["count"] == 4
 
 
-def test_main_preserves_leaf_category_for_unsplit_clusters():
+def test_build_root_hierarchy_preserves_leaf_categories_without_suffix_spam():
     clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2)
-    hierarchy = {
-        "编程语言": clusterer.build_hierarchy([], "编程语言", threshold=20),
-    }
-    hierarchy["编程语言"]["bookmarks"] = []
-    hierarchy["编程语言"]["subcategories"] = {}
-    hierarchy["编程语言"]["count"] = 0
-
-    python_cluster = [
+    bookmarks = [
         _bookmark(1, name="Python 官方文档", url="https://docs.python.org/3/", domain="docs.python.org", category="编程语言/Python", folder=["学习", "Python"]),
-    ]
-    rust_cluster = [
         _bookmark(2, name="Rust 官方文档", url="https://doc.rust-lang.org/book/", domain="doc.rust-lang.org", category="编程语言/Rust", folder=["学习", "Rust"]),
+        _bookmark(3, name="PostgreSQL Docs", url="https://postgresql.org/docs", domain="postgresql.org", category="数据库/PostgreSQL", folder=["学习", "PostgreSQL"]),
+        _bookmark(4, name="PostgreSQL Wiki", url="https://wiki.postgresql.org", domain="wiki.postgresql.org", category="数据库/PostgreSQL", folder=["学习", "PostgreSQL"]),
     ]
 
-    for cluster in (python_cluster, rust_cluster):
-        cluster_category = clusterer._derive_cluster_label(cluster, "其他/未分类")
-        category_bucket = hierarchy["编程语言"]
-        category_bucket["count"] += len(cluster)
-        built = clusterer.build_hierarchy(cluster, cluster_category, threshold=20)
-        if built.get("subcategories"):
-            for name, item in built["subcategories"].items():
-                unique_name = clusterer._unique_subcategory_name(category_bucket["subcategories"], name)
-                category_bucket["subcategories"][unique_name] = item
-            category_bucket["bookmarks"].extend(built.get("bookmarks", []))
-        else:
-            unique_name = clusterer._unique_subcategory_name(category_bucket["subcategories"], built["category"])
-            category_bucket["subcategories"][unique_name] = {
-                **built,
-                "category": unique_name,
-            }
+    hierarchy = cluster_module.build_root_hierarchy(clusterer, bookmarks, threshold=20)
 
     programming = hierarchy["编程语言"]
-    assert sorted(programming["subcategories"].keys()) == ["编程语言/Python", "编程语言/Rust"]
-    assert programming["bookmarks"] == []
+    database = hierarchy["数据库"]
+    assert programming["category"] == "编程语言"
+    assert database["category"] == "数据库"
+    assert programming["count"] == 2
+    assert database["count"] == 2
+    assert {bookmark["name"] for bookmark in programming["bookmarks"]} == {"Python 官方文档", "Rust 官方文档"}
+    assert all(not name.endswith(")") for name in programming.get("subcategories", {}))
+    assert all(not name.endswith(")") for name in database.get("subcategories", {}))

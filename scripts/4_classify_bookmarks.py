@@ -296,6 +296,7 @@ class BookmarkClassifier:
         return items[: self.dynamic_topic_rules.get("max_candidates", 8)]
 
     def classify_bookmark(self, bookmark: dict) -> dict[str, Any]:
+        link_health = bookmark.get("metadata", {}).get("link_health", {})
         topic_scores = []
         for category_name, category_rules in self.categories.items():
             scored = self._score_category(bookmark, category_name, category_rules)
@@ -315,11 +316,15 @@ class BookmarkClassifier:
         quality_signals = self._infer_quality_signals(bookmark, topic_scores, resource_type)
         top_score = topic_scores[0]["total"] if topic_scores else 0.0
         needs_confirmation = top_score < self.scoring["confirm_threshold"]
+        review_required = bool(link_health.get("review_required"))
+        review_category = link_health.get("reason_label")
+        review_reason_code = link_health.get("reason_code")
         classification_evidence = {
             "topic_scores": topic_scores[:8],
             "resource_type": resource_type_evidence,
             "dynamic_topic_candidates": dynamic_candidates,
             "folder_alignment_score": folder_alignment_score,
+            "link_health": link_health,
         }
 
         return {
@@ -334,6 +339,9 @@ class BookmarkClassifier:
             "classification_evidence": classification_evidence,
             "score": round(top_score, 2),
             "needs_confirmation": needs_confirmation,
+            "review_required": review_required,
+            "review_category": review_category,
+            "review_reason_code": review_reason_code,
             "all_scores": {item["topic"]: {k: v for k, v in item.items() if k != "topic"} for item in topic_scores},
             "folder_alignment_score": folder_alignment_score,
         }
@@ -400,6 +408,8 @@ def export_confirmation_report(confirm_needed: list, report_file: Path) -> None:
                 "primary_topics": bm["classification"]["primary_topics"],
                 "resource_type": bm["classification"]["resource_type"],
                 "score": bm["classification"]["score"],
+                "review_required": bm["classification"]["review_required"],
+                "review_category": bm["classification"]["review_category"],
             }
             for bm in confirm_needed
         ],

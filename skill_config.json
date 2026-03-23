@@ -14,7 +14,8 @@
     "reports_directory": "output/reports",
     "duplicate_report_file": "output/reports/duplicates.json",
     "broken_links_report_file": "output/reports/broken_links.json",
-    "confirmation_report_file": "output/reports/needs_confirmation.json"
+    "confirmation_report_file": "output/reports/needs_confirmation.json",
+    "review_report_file": "output/reports/review_queue.json"
   },
   "fetch_options": {
     "concurrent_limit": 15,
@@ -22,9 +23,17 @@
     "delay": 0.8,
     "batch_size": 50,
     "max_retries": 2,
+    "force_refetch": false,
     "cache_file": "data/bookmarks_with_info.json",
     "check_broken_links": true,
-    "user_agent": "BookmarksOrganizer/1.1 (+https://example.com)"
+    "user_agent": "BookmarksOrganizer/1.1 (+https://example.com)",
+    "proxy": {
+      "enabled": false,
+      "trust_env": false,
+      "http_proxy": null,
+      "https_proxy": null,
+      "all_proxy": null
+    }
   },
   "classification_options": {
     "min_score": 15,

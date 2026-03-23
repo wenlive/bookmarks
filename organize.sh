@@ -6,6 +6,7 @@ set -euo pipefail
 BOOKMARK_FILE="${1:-data/bookmarks.html}"
 CONFIG_FILE="${2:-skill_config.json}"
 OUTPUT_HTML="${OUTPUT_HTML:-output/organized_bookmarks.html}"
+FETCH_ARGS=("${@:3}")
 
 mkdir -p data output logs output/reports
 
@@ -25,7 +26,7 @@ echo "⚙️  配置文件: ${CONFIG_FILE}"
 
 python3 scripts/1_copy_bookmark.py --config "${CONFIG_FILE}" --source "${BOOKMARK_FILE}"
 python3 scripts/2_parse_bookmarks.py --config "${CONFIG_FILE}"
-python3 scripts/3_fetch_webpage_info.py --config "${CONFIG_FILE}"
+python3 scripts/3_fetch_webpage_info.py --config "${CONFIG_FILE}" "${FETCH_ARGS[@]}"
 python3 scripts/4_classify_bookmarks.py --config "${CONFIG_FILE}"
 python3 scripts/5_cluster_bookmarks.py --config "${CONFIG_FILE}"
 python3 scripts/6_generate_html.py --config "${CONFIG_FILE}" --output "${OUTPUT_HTML}"

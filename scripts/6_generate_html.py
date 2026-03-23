@@ -66,7 +66,7 @@ class BookmarkHTMLGenerator:
         html += f"{indent}</DL><p>\n"
         return html
 
-    def generate_html(self, hierarchy: Dict) -> str:
+    def generate_html(self, hierarchy: Dict, review_hierarchy: Dict | None = None) -> str:
         html = "<!DOCTYPE NETSCAPE-Bookmark-file-1>\n"
         html += "<!-- This is an automatically generated file. DO NOT EDIT! -->\n"
         html += '<META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=UTF-8">\n'
@@ -87,6 +87,11 @@ class BookmarkHTMLGenerator:
             html += self.generate_folder(node)
         if other_category:
             html += self.generate_folder(other_category)
+        if review_hierarchy:
+            review_nodes = [self.normalize_node(category, data) for category, data in review_hierarchy.items()]
+            review_nodes.sort(key=lambda item: (-item["count"], item["name"]))
+            for node in review_nodes:
+                html += self.generate_folder(node)
 
         html += "    </DL><p>\n"
         html += "    <DT><H3>其他书签</H3>\n    <DL><p>\n    </DL><p>\n"
@@ -109,9 +114,11 @@ def main() -> int:
         print(f"错误: 输入文件不存在: {input_file}")
         return 1
 
-    hierarchy = json.loads(input_file.read_text(encoding="utf-8"))["hierarchy"]
+    payload = json.loads(input_file.read_text(encoding="utf-8"))
+    hierarchy = payload["hierarchy"]
+    review_hierarchy = payload.get("review_hierarchy", {})
     generator = BookmarkHTMLGenerator()
-    html_content = generator.generate_html(hierarchy)
+    html_content = generator.generate_html(hierarchy, review_hierarchy)
     ensure_parent(output_file)
     output_file.write_text(html_content, encoding="utf-8")
 

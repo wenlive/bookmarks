@@ -28,6 +28,7 @@ class PipelinePaths:
     duplicate_report_file: Path
     broken_links_report_file: Path
     confirmation_report_file: Path
+    review_report_file: Path
 
 
 class JsonFormatter(logging.Formatter):
@@ -49,6 +50,7 @@ DEFAULT_PATHS = {
     "duplicate_report_file": ROOT_DIR / "output" / "reports" / "duplicates.json",
     "broken_links_report_file": ROOT_DIR / "output" / "reports" / "broken_links.json",
     "confirmation_report_file": ROOT_DIR / "output" / "reports" / "needs_confirmation.json",
+    "review_report_file": ROOT_DIR / "output" / "reports" / "review_queue.json",
 }
 
 
@@ -81,17 +83,27 @@ class PipelineConfig:
             duplicate_report_file=_resolve_path(raw.get("output", {}).get("duplicate_report_file"), reports_dir / "duplicates.json", self.base_dir),
             broken_links_report_file=_resolve_path(raw.get("output", {}).get("broken_links_report_file"), reports_dir / "broken_links.json", self.base_dir),
             confirmation_report_file=_resolve_path(raw.get("output", {}).get("confirmation_report_file"), reports_dir / "needs_confirmation.json", self.base_dir),
+            review_report_file=_resolve_path(raw.get("output", {}).get("review_report_file"), reports_dir / "review_queue.json", self.base_dir),
         )
+        proxy_options = raw.get("fetch_options", {}).get("proxy", {})
         self.fetch_options = {
             "concurrent_limit": raw.get("fetch_options", {}).get("concurrent_limit", 15),
             "timeout": raw.get("fetch_options", {}).get("timeout", 15),
             "delay": raw.get("fetch_options", {}).get("delay", 0.8),
             "batch_size": raw.get("fetch_options", {}).get("batch_size", 50),
             "max_retries": raw.get("fetch_options", {}).get("max_retries", 2),
+            "force_refetch": raw.get("fetch_options", {}).get("force_refetch", False),
             "check_broken_links": raw.get("fetch_options", {}).get("check_broken_links", True),
             "user_agent": raw.get("fetch_options", {}).get(
                 "user_agent", "BookmarksOrganizer/1.1 (+https://example.com)"
             ),
+            "proxy": {
+                "enabled": proxy_options.get("enabled", False),
+                "trust_env": proxy_options.get("trust_env", False),
+                "http_proxy": proxy_options.get("http_proxy"),
+                "https_proxy": proxy_options.get("https_proxy"),
+                "all_proxy": proxy_options.get("all_proxy"),
+            },
         }
         self.classification_options = raw.get("classification_options", {})
         self.clustering_options = raw.get("clustering_options", {})

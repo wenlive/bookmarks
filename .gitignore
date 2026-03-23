@@ -26,6 +26,7 @@ venv/
 ENV/
 env/
 .venv
+.venv-system/
 
 # IDE
 .vscode/
@@ -39,6 +40,7 @@ env/
 data/*.html
 data/*.json
 !data/category_rules.json
+bookmarks_*.html
 output/
 logs/
 *.log

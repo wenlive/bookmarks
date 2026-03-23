@@ -481,6 +481,17 @@ class BookmarkClusterer:
         return [token for token, _ in counter.most_common(limit)]
 
     def _derive_cluster_label(self, bookmarks: List[dict], fallback_category: str) -> str:
+        explicit_categories = [
+            bookmark.get("classification", {}).get("category", "")
+            for bookmark in bookmarks
+            if bookmark.get("classification", {}).get("category")
+        ]
+        category_counter = Counter(explicit_categories)
+        dominant_category = category_counter.most_common(1)
+        if dominant_category and dominant_category[0][0]:
+            dominant_name, dominant_count = dominant_category[0]
+            if dominant_count >= max(2, len(bookmarks) // 2):
+                return dominant_name
         features = [self.build_feature_set(bookmark) for bookmark in bookmarks]
         topic = Counter(feature.primary_topic for feature in features if feature.primary_topic).most_common(1)
         if topic and topic[0][0]:
@@ -489,6 +500,36 @@ class BookmarkClusterer:
         if tokens:
             return f"{fallback_category}/{'-'.join(tokens[:2])}"
         return fallback_category
+
+    def _normalize_cluster_label(self, category: str, raw_label: str, bookmarks: List[dict]) -> str:
+        root = category.split("/")[0]
+        category_parts = [part for part in category.split("/") if part]
+        raw_parts = [part for part in raw_label.split("/") if part]
+        if raw_parts and raw_parts[0] == root:
+            raw_parts = raw_parts[1:]
+        cleaned_parts = [part for part in raw_parts if part and part not in category_parts]
+        if not cleaned_parts:
+            for token in self._representative_tokens(bookmarks, limit=4):
+                if token not in STOPWORDS and token not in {part.lower() for part in category_parts}:
+                    cleaned_parts = [token]
+                    break
+        if not cleaned_parts:
+            cleaned_parts = ["其他"]
+        return f"{category}/{'/'.join(cleaned_parts)}"
+
+    def _merge_named_subcategory(self, subcategories: Dict[str, Dict], name: str, payload: Dict) -> None:
+        existing = subcategories.get(name)
+        if existing is None:
+            subcategories[name] = payload
+            return
+        existing["bookmarks"].extend(payload.get("bookmarks", []))
+        existing["count"] = len(existing["bookmarks"])
+        existing["representative_tokens"] = self._representative_tokens(existing["bookmarks"])
+        existing["source_folder_reused"] = existing.get("source_folder_reused", False) and payload.get("source_folder_reused", False)
+        existing["source_folder_quality_score"] = max(existing.get("source_folder_quality_score", 0.0), payload.get("source_folder_quality_score", 0.0))
+        merged_categories = set(existing.get("merge_from_categories", [])) | set(payload.get("merge_from_categories", []))
+        existing["merge_from_categories"] = sorted(merged_categories)
+        existing["cluster_reason"] = self._build_cluster_reason(existing["bookmarks"])
 
     def _build_cluster_reason(self, bookmarks: List[dict]) -> str:
         features = [self.build_feature_set(bookmark) for bookmark in bookmarks]
@@ -572,7 +613,7 @@ class BookmarkClusterer:
             if len(cluster) < 2:
                 ungrouped.extend(cluster)
                 continue
-            label = self._derive_cluster_label(cluster, category)
+            label = self._normalize_cluster_label(category, self._derive_cluster_label(cluster, category), cluster)
             folder_counter = Counter(tuple(bookmark.get("original_folder_path", [])) for bookmark in cluster if bookmark.get("original_folder_path"))
             best_folder = list(folder_counter.most_common(1)[0][0]) if folder_counter else []
             folder_quality = self._folder_quality_score(cluster)
@@ -582,8 +623,7 @@ class BookmarkClusterer:
                 subcategory_name = f"{category}/{display_name}"
             else:
                 subcategory_name = label if "/" in label else f"{category}/{label}"
-            subcategory_name = self._unique_subcategory_name(subcategories, subcategory_name)
-            subcategories[subcategory_name] = {
+            payload = {
                 "bookmarks": cluster,
                 "count": len(cluster),
                 "cluster_reason": self._build_cluster_reason(cluster),
@@ -592,6 +632,7 @@ class BookmarkClusterer:
                 "source_folder_quality_score": folder_quality,
                 "merge_from_categories": sorted({bookmark.get("classification", {}).get("category", "") for bookmark in cluster if bookmark.get("classification")}),
             }
+            self._merge_named_subcategory(subcategories, subcategory_name, payload)
         if not subcategories:
             return self._fallback_clusters(bookmarks, category)
         return {
@@ -605,6 +646,24 @@ class BookmarkClusterer:
             "source_folder_quality_score": 0.0,
             "merge_from_categories": sorted({bookmark.get("classification", {}).get("category", "") for bookmark in bookmarks if bookmark.get("classification")}),
         }
+
+
+def root_category_for(bookmark: dict) -> str:
+    category = bookmark.get("classification", {}).get("category", "") or "其他/未分类"
+    return category.split("/")[0] if "/" in category else category
+
+
+def build_root_hierarchy(clusterer: BookmarkClusterer, bookmarks: List[dict], threshold: int) -> dict[str, dict]:
+    buckets: dict[str, list[dict]] = defaultdict(list)
+    for bookmark in bookmarks:
+        buckets[root_category_for(bookmark)].append(bookmark)
+
+    hierarchy: dict[str, dict] = {}
+    for root_category, group in sorted(buckets.items()):
+        built = clusterer.build_hierarchy(group, root_category, threshold=threshold)
+        built["category"] = root_category
+        hierarchy[root_category] = built
+    return hierarchy
 
 
 def main() -> int:
@@ -634,42 +693,51 @@ def main() -> int:
         domain_split_min_size=options.get("domain_split_min_size", 5),
     )
 
-    hierarchy_clusters = clusterer._connected_components(
+    hierarchy = build_root_hierarchy(
+        clusterer,
         bookmarks,
-        [clusterer.build_feature_set(bookmark) for bookmark in bookmarks],
+        threshold=options.get("max_bookmarks_without_clustering", 20),
     )
-    hierarchy_clusters = clusterer._merge_if_needed(clusterer._split_if_needed(hierarchy_clusters))
 
-    hierarchy: dict[str, dict] = {}
-    for cluster in hierarchy_clusters:
-        cluster_category = clusterer._derive_cluster_label(cluster, "其他/未分类")
-        root_category = cluster_category.split("/")[0] if "/" in cluster_category else cluster_category
-        if root_category not in hierarchy:
-            hierarchy[root_category] = clusterer.build_hierarchy([], root_category, threshold=options.get("max_bookmarks_without_clustering", 20))
-            hierarchy[root_category]["bookmarks"] = []
-            hierarchy[root_category]["subcategories"] = {}
-            hierarchy[root_category]["count"] = 0
-        category_bucket = hierarchy[root_category]
-        category_bucket["count"] += len(cluster)
-        built = clusterer.build_hierarchy(cluster, cluster_category, threshold=options.get("max_bookmarks_without_clustering", 20))
-        if built.get("subcategories"):
-            for name, item in built["subcategories"].items():
-                unique_name = clusterer._unique_subcategory_name(category_bucket["subcategories"], name)
-                category_bucket["subcategories"][unique_name] = item
-            category_bucket["bookmarks"].extend(built.get("bookmarks", []))
-        else:
-            unique_name = clusterer._unique_subcategory_name(category_bucket["subcategories"], built["category"])
-            category_bucket["subcategories"][unique_name] = {
-                **built,
-                "category": unique_name,
-            }
+    review_groups: dict[str, list[dict]] = defaultdict(list)
+    for bookmark in bookmarks:
+        classification = bookmark.get("classification", {})
+        if classification.get("review_required"):
+            review_groups[classification.get("review_category") or "其他抓取异常"].append(bookmark)
+
+    review_hierarchy = {}
+    if review_groups:
+        review_hierarchy["待审阅"] = {
+            "category": "待审阅",
+            "subcategories": {
+                f"待审阅/{reason}": {
+                    "bookmarks": group,
+                    "count": len(group),
+                    "cluster_reason": f"按异常原因归档: {reason}",
+                    "representative_tokens": clusterer._representative_tokens(group),
+                    "source_folder_reused": False,
+                    "source_folder_quality_score": 0.0,
+                    "merge_from_categories": sorted({bookmark.get("classification", {}).get("category", "") for bookmark in group if bookmark.get("classification")}),
+                }
+                for reason, group in sorted(review_groups.items())
+            },
+            "bookmarks": [],
+            "count": sum(len(group) for group in review_groups.values()),
+            "cluster_reason": "将抓取异常书签镜像到统一待审阅目录",
+            "representative_tokens": [],
+            "source_folder_reused": False,
+            "source_folder_quality_score": 0.0,
+            "merge_from_categories": sorted({bookmark.get("classification", {}).get("category", "") for group in review_groups.values() for bookmark in group if bookmark.get("classification")}),
+        }
 
     output = {
         "hierarchy": hierarchy,
+        "review_hierarchy": review_hierarchy,
         "stats": {
             "total_categories": len(hierarchy),
             "category_sizes": {category: item["count"] for category, item in hierarchy.items()},
             "subcategories_count": sum(len(item["subcategories"]) for item in hierarchy.values()),
+            "review_categories": {category: item["count"] for category, item in review_hierarchy.items()},
         },
     }
     ensure_parent(output_file)
