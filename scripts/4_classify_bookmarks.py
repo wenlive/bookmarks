@@ -2,6 +2,7 @@
 """步骤4: 基于先验规则与开放候选的多维书签标注。"""
 from __future__ import annotations
 
+import copy
 import json
 import re
 from collections import Counter, defaultdict
@@ -40,9 +41,40 @@ TOKEN_STOPWORDS = {
 }
 
 
+def merge_rule_payload(base: Any, override: Any) -> Any:
+    if isinstance(base, dict) and isinstance(override, dict):
+        merged = {key: copy.deepcopy(value) for key, value in base.items()}
+        for key, value in override.items():
+            if key in merged:
+                merged[key] = merge_rule_payload(merged[key], value)
+            else:
+                merged[key] = copy.deepcopy(value)
+        return merged
+
+    if isinstance(base, list) and isinstance(override, list):
+        merged = list(base)
+        seen = {json.dumps(item, ensure_ascii=False, sort_keys=True) for item in merged}
+        for item in override:
+            marker = json.dumps(item, ensure_ascii=False, sort_keys=True)
+            if marker not in seen:
+                merged.append(copy.deepcopy(item))
+                seen.add(marker)
+        return merged
+
+    return copy.deepcopy(override)
+
+
+def load_rule_bundle(rules_file: Path, overrides_file: Path | None = None) -> dict[str, Any]:
+    payload = json.loads(rules_file.read_text(encoding="utf-8"))
+    if overrides_file and overrides_file.exists():
+        override_payload = json.loads(overrides_file.read_text(encoding="utf-8"))
+        payload = merge_rule_payload(payload, override_payload)
+    return payload
+
+
 class BookmarkClassifier:
-    def __init__(self, rules_file: Path, classification_options: dict | None = None):
-        self.rules = json.loads(rules_file.read_text(encoding="utf-8"))
+    def __init__(self, rules_file: Path, classification_options: dict | None = None, overrides_file: Path | None = None):
+        self.rules = load_rule_bundle(rules_file, overrides_file)
         self.categories = self.rules["categories"]
         self.default_category = self.rules["default_category"]
         self.scoring = dict(self.rules["scoring"])
@@ -53,6 +85,7 @@ class BookmarkClassifier:
         self.intent_rules = self.rules.get("intent_rules", {})
         self.quality_signal_rules = self.rules.get("quality_signal_rules", {})
         self.dynamic_topic_rules = self.rules.get("dynamic_topic_rules", {})
+        self.cluster_hint_limit = self.dynamic_topic_rules.get("cluster_hint_limit", 12)
 
     @staticmethod
     def _contains_keyword(text: str, keyword: str) -> bool:
@@ -295,6 +328,127 @@ class BookmarkClassifier:
         items.sort(key=lambda entry: (-entry["score"], entry["topic"]))
         return items[: self.dynamic_topic_rules.get("max_candidates", 8)]
 
+    @staticmethod
+    def _category_root(topic: str) -> str:
+        return topic.split("/")[0] if "/" in topic else topic
+
+    @staticmethod
+    def _category_leaf(topic: str) -> str:
+        parts = [part for part in topic.split("/") if part]
+        return parts[-1] if parts else topic
+
+    def _is_strong_rule_evidence(self, score_item: dict[str, Any]) -> bool:
+        return any(
+            evidence.get("signal") in {"domain", "title"}
+            for evidence in score_item.get("evidence", [])
+        )
+
+    def _build_rule_candidates(self, topic_scores: list[dict[str, Any]], limit: int = 5) -> list[dict[str, Any]]:
+        candidates = []
+        for item in topic_scores[:limit]:
+            topic = item["topic"]
+            candidates.append(
+                {
+                    "category": topic,
+                    "root": self._category_root(topic),
+                    "leaf": self._category_leaf(topic),
+                    "total": item["total"],
+                    "strong_evidence": self._is_strong_rule_evidence(item),
+                    "evidence": item.get("evidence", []),
+                }
+            )
+        return candidates
+
+    def _build_rule_roots(self, topic_scores: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        totals: Counter[str] = Counter()
+        for item in topic_scores[:8]:
+            totals[self._category_root(item["topic"])] += item["total"]
+        grand_total = sum(totals.values())
+        roots = []
+        for root, total in totals.most_common():
+            roots.append(
+                {
+                    "root": root,
+                    "total": round(total, 2),
+                    "support": round(total / grand_total, 4) if grand_total else 0.0,
+                }
+            )
+        return roots
+
+    def _rule_confidence(self, topic_scores: list[dict[str, Any]]) -> float:
+        if not topic_scores:
+            return 0.0
+
+        top1 = topic_scores[0]["total"]
+        top2 = topic_scores[1]["total"] if len(topic_scores) > 1 else 0.0
+        margin = max(top1 - top2, 0.0)
+        threshold = max(float(self.scoring.get("confirm_threshold", 25)), 1.0)
+        confidence = min(top1 / threshold, 1.0) * 0.55 + min(margin / 20.0, 1.0) * 0.25
+        if self._is_strong_rule_evidence(topic_scores[0]):
+            confidence += 0.2
+        return round(min(confidence, 1.0), 3)
+
+    def _cluster_hint_tokens(self, text: str) -> list[str]:
+        allowed_short = {token.lower() for token in self.dynamic_topic_rules.get("allow_short_tokens", [])}
+        tokens = []
+        for raw in re.findall(r"[A-Za-z][A-Za-z0-9+#.-]{1,}|[\u4e00-\u9fff]{2,}", text or ""):
+            normalized = raw.strip("-_.")
+            lowered = normalized.lower()
+            if not lowered or lowered in TOKEN_STOPWORDS or lowered.isdigit():
+                continue
+            if len(lowered) < 4 and lowered not in allowed_short:
+                continue
+            tokens.append(self._title_case_token(normalized))
+        return tokens
+
+    def _extract_cluster_hints(
+        self,
+        bookmark: dict,
+        topic_scores: list[dict[str, Any]],
+        dynamic_candidates: list[dict[str, Any]],
+    ) -> list[str]:
+        text_fields = self._collect_text_fields(bookmark)
+        metadata = metadata_texts(bookmark.get("metadata", {}))
+        hints: list[str] = []
+
+        for candidate in dynamic_candidates[:6]:
+            hints.append(candidate["topic"])
+
+        site_name = metadata.get("site_name", "").strip()
+        if site_name:
+            hints.append(site_name)
+
+        for value in (
+            metadata.get("brand_terms", ""),
+            text_fields["name"],
+            text_fields["title"],
+            text_fields["h1"],
+            text_fields["keywords"],
+            text_fields["url_path"],
+        ):
+            hints.extend(self._cluster_hint_tokens(value))
+
+        for item in topic_scores[:3]:
+            if item["total"] < max(10, self.scoring.get("min_score", 15) * 0.7):
+                continue
+            hints.append(self._category_root(item["topic"]))
+            hints.append(self._category_leaf(item["topic"]))
+
+        deduped = []
+        seen = set()
+        for hint in hints:
+            normalized = self._normalize_label(str(hint))
+            if not normalized:
+                continue
+            marker = normalized.lower()
+            if marker in seen:
+                continue
+            seen.add(marker)
+            deduped.append(normalized)
+            if len(deduped) >= self.cluster_hint_limit:
+                break
+        return deduped
+
     def classify_bookmark(self, bookmark: dict) -> dict[str, Any]:
         link_health = bookmark.get("metadata", {}).get("link_health", {})
         topic_scores = []
@@ -304,6 +458,8 @@ class BookmarkClassifier:
                 topic_scores.append(scored)
         topic_scores.sort(key=lambda item: item["total"], reverse=True)
 
+        rule_candidates = self._build_rule_candidates(topic_scores)
+        rule_roots = self._build_rule_roots(topic_scores)
         confident_topics = [item for item in topic_scores if item["total"] >= self.scoring["min_score"]]
         primary_topics = [item["topic"] for item in confident_topics[:2]]
         secondary_topics = [item["topic"] for item in confident_topics[2:5]]
@@ -313,9 +469,11 @@ class BookmarkClassifier:
         intent_labels = self._infer_intent_labels(bookmark)
         topic_labels = sorted(set(primary_topics + secondary_topics))
         dynamic_candidates = self._extract_dynamic_topic_candidates(bookmark, topic_labels)
+        cluster_hints = self._extract_cluster_hints(bookmark, topic_scores, dynamic_candidates)
         quality_signals = self._infer_quality_signals(bookmark, topic_scores, resource_type)
         top_score = topic_scores[0]["total"] if topic_scores else 0.0
         needs_confirmation = top_score < self.scoring["confirm_threshold"]
+        rule_confidence = self._rule_confidence(topic_scores)
         review_required = bool(link_health.get("review_required"))
         review_category = link_health.get("reason_label")
         review_reason_code = link_health.get("reason_code")
@@ -325,10 +483,13 @@ class BookmarkClassifier:
             "dynamic_topic_candidates": dynamic_candidates,
             "folder_alignment_score": folder_alignment_score,
             "link_health": link_health,
+            "rule_candidates": rule_candidates,
+            "rule_roots": rule_roots,
         }
 
         return {
             "category": fallback_category,
+            "display_category": fallback_category,
             "primary_topics": primary_topics or ([self.default_category] if not dynamic_candidates else []),
             "secondary_topics": secondary_topics,
             "topic_labels": topic_labels,
@@ -336,6 +497,10 @@ class BookmarkClassifier:
             "intent_labels": intent_labels,
             "quality_signals": quality_signals,
             "open_topic_candidates": dynamic_candidates,
+            "rule_candidates": rule_candidates,
+            "rule_roots": rule_roots,
+            "rule_confidence": rule_confidence,
+            "cluster_hints": cluster_hints,
             "classification_evidence": classification_evidence,
             "score": round(top_score, 2),
             "needs_confirmation": needs_confirmation,
@@ -421,6 +586,7 @@ def main() -> int:
     parser = build_parser("分类书签")
     parser.add_argument("--input", type=Path, default=None)
     parser.add_argument("--rules", type=Path, default=None)
+    parser.add_argument("--rules-override", type=Path, default=None)
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--report", type=Path, default=None, help="待确认报告输出路径")
     args = parser.parse_args()
@@ -429,6 +595,7 @@ def main() -> int:
     logger = configure_logging(config, args.log_level)
     input_file = args.input or config.paths.enriched_file
     rules_file = args.rules or config.paths.rules_file
+    rules_override_file = args.rules_override or config.paths.rules_override_file
     output_file = args.output or config.paths.classified_file
     report_file = args.report or config.paths.confirmation_report_file
 
@@ -440,7 +607,7 @@ def main() -> int:
         return 1
 
     bookmarks = json.loads(input_file.read_text(encoding="utf-8"))["bookmarks"]
-    classifier = BookmarkClassifier(rules_file, config.classification_options)
+    classifier = BookmarkClassifier(rules_file, config.classification_options, rules_override_file)
     classified_bookmarks, stats, confirm_needed = classifier.classify_all(bookmarks)
 
     output = {

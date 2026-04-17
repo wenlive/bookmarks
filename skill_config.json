@@ -1,7 +1,8 @@
 {
   "input": {
     "bookmark_file": "data/bookmarks.html",
-    "rules_file": "data/category_rules.json"
+    "rules_file": "data/category_rules.json",
+    "rules_override_file": "data/category_rules_overrides.json"
   },
   "pipeline": {
     "copied_bookmark_file": "data/bookmarks.html",
@@ -15,7 +16,8 @@
     "duplicate_report_file": "output/reports/duplicates.json",
     "broken_links_report_file": "output/reports/broken_links.json",
     "confirmation_report_file": "output/reports/needs_confirmation.json",
-    "review_report_file": "output/reports/review_queue.json"
+    "review_report_file": "output/reports/review_queue.json",
+    "rule_suggestions_report_file": "output/reports/rule_suggestions.json"
   },
   "fetch_options": {
     "concurrent_limit": 15,
@@ -80,6 +82,7 @@
     "max_keywords": 3,
     "max_bookmarks_without_clustering": 20,
     "domain_split_min_size": 4,
+    "discovery_root_name": "发现主题",
     "root_groups": [
       {"name": "数据库与存储", "roots": ["数据库"]},
       {"name": "编程开发", "roots": ["编程语言", "前端开发", "后端开发", "网络编程", "配置开发环境"]},
@@ -92,7 +95,8 @@
       "max_depth": 3,
       "collapse_single_child": true,
       "prefer_human_labels": true,
-      "fallback_group_name": "实验与杂项"
+      "fallback_group_name": "实验与杂项",
+      "discovery_root_name": "发现主题"
     }
   },
   "logging": {

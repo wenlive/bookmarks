@@ -55,6 +55,7 @@ DEFAULT_DISPLAY_OPTIONS = {
     "collapse_single_child": True,
     "prefer_human_labels": True,
     "fallback_group_name": "实验与杂项",
+    "discovery_root_name": "发现主题",
 }
 
 
@@ -68,12 +69,14 @@ class PipelinePaths:
     clustering_file: Path
     html_output: Path
     rules_file: Path
+    rules_override_file: Path
     reports_dir: Path
     log_file: Path
     duplicate_report_file: Path
     broken_links_report_file: Path
     confirmation_report_file: Path
     review_report_file: Path
+    rule_suggestions_report_file: Path
 
 
 class JsonFormatter(logging.Formatter):
@@ -90,12 +93,14 @@ DEFAULT_PATHS = {
     "clustering_file": ROOT_DIR / "data" / "clustering_result.json",
     "html_output": ROOT_DIR / "output" / "organized_bookmarks.html",
     "rules_file": ROOT_DIR / "data" / "category_rules.json",
+    "rules_override_file": ROOT_DIR / "data" / "category_rules_overrides.json",
     "reports_dir": ROOT_DIR / "output" / "reports",
     "log_file": ROOT_DIR / "logs" / "bookmarks_organizer.log",
     "duplicate_report_file": ROOT_DIR / "output" / "reports" / "duplicates.json",
     "broken_links_report_file": ROOT_DIR / "output" / "reports" / "broken_links.json",
     "confirmation_report_file": ROOT_DIR / "output" / "reports" / "needs_confirmation.json",
     "review_report_file": ROOT_DIR / "output" / "reports" / "review_queue.json",
+    "rule_suggestions_report_file": ROOT_DIR / "output" / "reports" / "rule_suggestions.json",
 }
 
 
@@ -184,12 +189,14 @@ class PipelineConfig:
             clustering_file=_resolve_path(raw.get("pipeline", {}).get("clustering_file"), DEFAULT_PATHS["clustering_file"], self.base_dir),
             html_output=_resolve_path(raw.get("output", {}).get("html_file"), DEFAULT_PATHS["html_output"], self.base_dir),
             rules_file=_resolve_path(raw.get("input", {}).get("rules_file"), DEFAULT_PATHS["rules_file"], self.base_dir),
+            rules_override_file=_resolve_path(raw.get("input", {}).get("rules_override_file"), DEFAULT_PATHS["rules_override_file"], self.base_dir),
             reports_dir=reports_dir,
             log_file=_resolve_path(raw.get("logging", {}).get("file"), DEFAULT_PATHS["log_file"], self.base_dir),
             duplicate_report_file=_resolve_path(raw.get("output", {}).get("duplicate_report_file"), reports_dir / "duplicates.json", self.base_dir),
             broken_links_report_file=_resolve_path(raw.get("output", {}).get("broken_links_report_file"), reports_dir / "broken_links.json", self.base_dir),
             confirmation_report_file=_resolve_path(raw.get("output", {}).get("confirmation_report_file"), reports_dir / "needs_confirmation.json", self.base_dir),
             review_report_file=_resolve_path(raw.get("output", {}).get("review_report_file"), reports_dir / "review_queue.json", self.base_dir),
+            rule_suggestions_report_file=_resolve_path(raw.get("output", {}).get("rule_suggestions_report_file"), reports_dir / "rule_suggestions.json", self.base_dir),
         )
         proxy_options = raw.get("fetch_options", {}).get("proxy", {})
         review_policy = raw.get("fetch_options", {}).get("review_policy", {})
@@ -220,6 +227,8 @@ class PipelineConfig:
         }
         self.classification_options = raw.get("classification_options", {})
         self.clustering_options = dict(raw.get("clustering_options", {}))
+        self.clustering_options.pop("mode", None)
+        self.clustering_options.setdefault("discovery_root_name", DEFAULT_DISPLAY_OPTIONS["discovery_root_name"])
         self.clustering_options.setdefault("root_groups", DEFAULT_ROOT_GROUPS)
         display_options = dict(DEFAULT_DISPLAY_OPTIONS)
         display_options.update(self.clustering_options.get("display", {}))

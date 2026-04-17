@@ -100,6 +100,11 @@ def test_classifier_outputs_multidimensional_labels_and_confirmation_report(tmp_
     assert "学习" in classification["intent_labels"]
     assert classification["score"] > 0
     assert "classification_evidence" in classification
+    assert classification["display_category"] == classification["category"]
+    assert classification["rule_candidates"][0]["category"] == "编程语言/Python"
+    assert classification["rule_roots"][0]["root"] == "编程语言"
+    assert classification["rule_confidence"] > 0
+    assert classification["cluster_hints"]
 
     bookmark["classification"] = classification
     report = tmp_path / "needs_confirmation.json"
@@ -582,6 +587,94 @@ def test_rich_feature_clustering_splits_same_domain_different_topics():
         assert "cluster_reason" in item
 
 
+def test_global_clustering_can_group_cross_category_bookmarks_before_root_assignment():
+    clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2)
+    bookmarks = [
+        _bookmark(1, name="FastAPI 官方文档", url="https://fastapi.tiangolo.com/", domain="fastapi.tiangolo.com", category="后端开发/Python Web", folder=["学习", "FastAPI"], resource_type="文档", description="python fastapi web api", keywords="python,fastapi,api"),
+        _bookmark(2, name="FastAPI 生产实践", url="https://blog.example.com/fastapi-prod", domain="blog.example.com", category="技术博客/API 实践", folder=["博客", "FastAPI"], resource_type="博客", description="fastapi production deployment", keywords="fastapi,deployment,api"),
+        _bookmark(3, name="FastAPI Service Template", url="https://github.com/example/fastapi-service", domain="github.com", category="开源项目/Python 服务", folder=["代码", "FastAPI"], resource_type="仓库", description="fastapi service template repository", keywords="fastapi,service,repository"),
+    ]
+    for bookmark in bookmarks:
+        bookmark["classification"].update(
+            {
+                "display_category": bookmark["classification"]["category"],
+                "cluster_hints": ["FastAPI", "Python", "API"],
+                "open_topic_candidates": [{"topic": "FastAPI", "score": 8, "sources": ["title", "keywords"]}],
+                "rule_roots": [
+                    {"root": bookmark["classification"]["category"].split("/")[0], "support": 0.45, "total": 45.0},
+                    {"root": "开源项目", "support": 0.2, "total": 20.0},
+                ],
+                "rule_confidence": 0.42,
+            }
+        )
+
+    cluster_profiles = cluster_module.build_cluster_payloads(clusterer, bookmarks, threshold=20, discovery_root_name="发现主题")
+
+    assert len(cluster_profiles) == 1
+    assert cluster_profiles[0]["cluster_label"] == "FastAPI"
+    assert len(cluster_profiles[0]["bookmarks"]) == 3
+
+
+def test_ambiguous_rule_roots_fall_back_to_discovery_root():
+    clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2)
+    bookmarks = [
+        _bookmark(1, name="FastAPI 官方文档", url="https://fastapi.tiangolo.com/", domain="fastapi.tiangolo.com", category="后端开发/Python Web", folder=["学习", "FastAPI"], resource_type="文档", description="python fastapi web api", keywords="python,fastapi,api"),
+        _bookmark(2, name="FastAPI 生产实践", url="https://blog.example.com/fastapi-prod", domain="blog.example.com", category="技术博客/API 实践", folder=["博客", "FastAPI"], resource_type="博客", description="fastapi production deployment", keywords="fastapi,deployment,api"),
+        _bookmark(3, name="FastAPI Service Template", url="https://github.com/example/fastapi-service", domain="github.com", category="开源项目/Python 服务", folder=["代码", "FastAPI"], resource_type="仓库", description="fastapi service template repository", keywords="fastapi,service,repository"),
+    ]
+    weights = [0.4, 0.35, 0.3]
+    for bookmark, weight in zip(bookmarks, weights):
+        bookmark["classification"].update(
+            {
+                "display_category": bookmark["classification"]["category"],
+                "cluster_hints": ["FastAPI", "Python", "API"],
+                "open_topic_candidates": [{"topic": "FastAPI", "score": 8, "sources": ["title", "keywords"]}],
+                "rule_roots": [
+                    {"root": bookmark["classification"]["category"].split("/")[0], "support": weight, "total": weight * 100},
+                    {"root": "工程工具与资源", "support": 0.2, "total": 20.0},
+                ],
+                "rule_confidence": 0.38,
+            }
+        )
+
+    hierarchy = cluster_module.build_root_hierarchy(clusterer, bookmarks, threshold=20, discovery_root_name="发现主题")
+
+    assert "发现主题" in hierarchy
+    assert next(iter(hierarchy["发现主题"]["subcategories"].values()))["count"] == 3
+
+
+def test_generate_rule_suggestions_reports_low_purity_clusters():
+    bookmarks = [
+        {"id": f"bookmark_{index}", "name": f"FastAPI {index}", "url": f"https://example.com/{index}", "domain": "example.com", "classification": {"category": "其他/未分类"}}
+        for index in range(4)
+    ]
+    report = cluster_module.generate_rule_suggestions(
+        [
+            {
+                "cluster_id": "cluster_0001",
+                "cluster_label": "FastAPI",
+                "rule_purity": 0.22,
+                "destination_root": "发现主题",
+                "dominant_categories": [{"category": "其他/未分类", "root": "其他", "count": 4, "share": 1.0}],
+                "top_domains": [{"domain": "fastapi.tiangolo.com", "count": 2, "share": 0.5}],
+                "representative_tokens": ["fastapi", "python", "asgi"],
+                "discovered_topics": ["FastAPI", "Python"],
+                "bookmarks": bookmarks,
+            }
+        ],
+        discovery_root_name="发现主题",
+    )
+
+    assert report["count"] == 1
+    assert report["suggestions"][0]["cluster_label"] == "FastAPI"
+    assert report["suggestions"][0]["type"] in {
+        "add_domain_to_existing_category",
+        "add_keywords_to_existing_category",
+        "create_new_leaf_category",
+        "demote_noisy_keyword_or_folder_signal",
+    }
+
+
 def test_high_quality_folder_reused_and_low_quality_folder_split():
     clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2)
     high_quality = [
@@ -828,6 +921,7 @@ def test_cli_respects_config_and_creates_outputs(tmp_path):
     assert (tmp_path / "runtime" / "output" / "organized.html").exists()
     assert (tmp_path / "runtime" / "output" / "reports" / "needs_confirmation.json").exists()
     assert (tmp_path / "runtime" / "output" / "reports" / "duplicates.json").exists()
+    assert (tmp_path / "runtime" / "output" / "reports" / "rule_suggestions.json").exists()
     assert (tmp_path / "runtime" / "logs" / "app.log").exists()
 
 
@@ -850,6 +944,82 @@ def test_classifier_keeps_rule_and_open_topics_together():
     classification = classifier.classify_bookmark(bookmark)
     assert "数据库/PostgreSQL" in classification["primary_topics"]
     assert any(candidate["topic"] == "Neon" for candidate in classification["open_topic_candidates"])
+
+
+def test_classifier_merges_rule_overrides_without_dropping_base_rules(tmp_path):
+    rules_file = tmp_path / "rules.json"
+    overrides_file = tmp_path / "rules_override.json"
+    rules_file.write_text(
+        json.dumps(
+            {
+                "default_category": "其他/未分类",
+                "scoring": {
+                    "domain_weight": 40,
+                    "keyword_weight": 40,
+                    "title_weight": 40,
+                    "folder_weight": 20,
+                    "content_weight": 20,
+                    "min_score": 10,
+                    "confirm_threshold": 50,
+                },
+                "categories": {
+                    "编程语言/Python": {
+                        "domains": [],
+                        "keywords": ["python"],
+                        "title_patterns": [],
+                        "folder_keywords": ["Python"],
+                    }
+                },
+                "resource_type_rules": {},
+                "intent_rules": {},
+                "quality_signal_rules": {},
+                "dynamic_topic_rules": {"cluster_hint_limit": 8},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    overrides_file.write_text(
+        json.dumps(
+            {
+                "categories": {
+                    "编程语言/Python": {
+                        "domains": ["neon.tech"],
+                        "keywords": ["packaging"],
+                    }
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    classifier = classify_module.BookmarkClassifier(rules_file, overrides_file=overrides_file)
+    domain_hit = classifier.classify_bookmark(
+        {
+            "id": "bookmark_override_domain",
+            "name": "Neon Quickstart",
+            "url": "https://neon.tech/docs/quickstart",
+            "domain": "neon.tech",
+            "original_folder_path": ["数据库"],
+            "metadata": build_metadata("Neon Quickstart", "", "", "Neon", ""),
+        }
+    )
+    keyword_hit = classifier.classify_bookmark(
+        {
+            "id": "bookmark_base_keyword",
+            "name": "Python packaging notes",
+            "url": "https://example.com/python-packaging",
+            "domain": "example.com",
+            "original_folder_path": ["学习"],
+            "metadata": build_metadata("Python packaging notes", "", "python,packaging", "Example", "packaging docs"),
+        }
+    )
+
+    assert domain_hit["category"] == "编程语言/Python"
+    assert any(item["signal"] == "domain" for item in domain_hit["classification_evidence"]["topic_scores"][0]["evidence"])
+    assert keyword_hit["category"] == "编程语言/Python"
+    assert any(item["signal"] == "keywords" for item in keyword_hit["classification_evidence"]["topic_scores"][0]["evidence"])
 
 
 
@@ -1022,11 +1192,25 @@ def test_build_root_hierarchy_preserves_leaf_categories_without_suffix_spam():
     assert database["category"] == "数据库"
     assert programming["count"] == 2
     assert database["count"] == 2
-    assert set(programming["subcategories"]) == {"Python", "Rust"}
-    assert programming["bookmarks"] == []
-    assert database["subcategories"]["PostgreSQL"]["count"] == 2
+    assert len(programming["bookmarks"]) == 2
+    assert len(database["bookmarks"]) == 2
     assert all(not name.endswith(")") for name in programming.get("subcategories", {}))
     assert all(not name.endswith(")") for name in database.get("subcategories", {}))
+
+
+def test_build_root_hierarchy_uses_threshold_to_inline_small_pure_clusters():
+    clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2)
+    bookmarks = [
+        _bookmark(1, name="PostgreSQL Docs", url="https://postgresql.org/docs", domain="postgresql.org", category="数据库/PostgreSQL", folder=["学习", "PostgreSQL"]),
+        _bookmark(2, name="PostgreSQL Wiki", url="https://wiki.postgresql.org", domain="wiki.postgresql.org", category="数据库/PostgreSQL", folder=["学习", "PostgreSQL"]),
+    ]
+
+    low_threshold = cluster_module.build_root_hierarchy(clusterer, bookmarks, threshold=1)
+    high_threshold = cluster_module.build_root_hierarchy(clusterer, bookmarks, threshold=20)
+
+    assert set(low_threshold["数据库"]["subcategories"]) == {"PostgreSQL"}
+    assert high_threshold["数据库"]["subcategories"] == {}
+    assert len(high_threshold["数据库"]["bookmarks"]) == 2
 
 
 def test_build_display_hierarchy_groups_top_level_roots_for_human_browsing():
@@ -1047,11 +1231,37 @@ def test_build_display_hierarchy_groups_top_level_roots_for_human_browsing():
     )
 
     assert list(display_hierarchy) == ["数据库与存储", "编程开发"]
-    assert set(display_hierarchy["数据库与存储"]["subcategories"]) == {"PostgreSQL"}
-    assert set(display_hierarchy["编程开发"]["subcategories"]) == {"Python", "Rust"}
+    assert display_hierarchy["数据库与存储"]["subcategories"] == {}
+    assert display_hierarchy["编程开发"]["subcategories"] == {}
+    assert len(display_hierarchy["数据库与存储"]["bookmarks"]) == 2
+    assert len(display_hierarchy["编程开发"]["bookmarks"]) == 2
 
     html = html_module.BookmarkHTMLGenerator().generate_html(display_hierarchy)
     assert html.find("数据库与存储") < html.find("编程开发")
+
+
+def test_build_display_hierarchy_does_not_duplicate_discovery_root_when_already_grouped():
+    clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2)
+    root_hierarchy = {
+        "发现主题": {
+            "name": "发现主题",
+            "category": "发现主题",
+            "bookmarks": [{"name": "FastAPI", "url": "https://fastapi.tiangolo.com/"}],
+            "subcategories": {},
+            "count": 1,
+            "preserve_children": True,
+        }
+    }
+    root_groups = [{"name": "待整理", "roots": ["发现主题"]}]
+
+    display_hierarchy = cluster_module.build_display_hierarchy(
+        clusterer,
+        root_hierarchy,
+        root_groups,
+        common_module.DEFAULT_DISPLAY_OPTIONS,
+    )
+
+    assert list(display_hierarchy) == ["待整理"]
 
 
 def test_reset_pipeline_outputs_keeps_source_bookmark_file(tmp_path):
