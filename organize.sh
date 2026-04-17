@@ -6,7 +6,23 @@ set -euo pipefail
 BOOKMARK_FILE="${1:-data/bookmarks.html}"
 CONFIG_FILE="${2:-skill_config.json}"
 OUTPUT_HTML="${OUTPUT_HTML:-output/organized_bookmarks.html}"
-FETCH_ARGS=("${@:3}")
+CLEAR_FETCH_CACHE=false
+RESET_ALL=false
+FETCH_ARGS=()
+
+for arg in "${@:3}"; do
+  case "$arg" in
+    --clear-fetch-cache)
+      CLEAR_FETCH_CACHE=true
+      ;;
+    --reset-all)
+      RESET_ALL=true
+      ;;
+    *)
+      FETCH_ARGS+=("$arg")
+      ;;
+  esac
+done
 
 mkdir -p data output logs output/reports
 
@@ -16,13 +32,21 @@ if ! command -v python3 >/dev/null 2>&1; then
 fi
 
 if ! python3 -c "import bs4, aiohttp" >/dev/null 2>&1; then
-  echo "⚠️  依赖未安装，正在安装..."
-  python3 -m pip install -r requirements.txt
+  echo "❌ 错误: 依赖未安装。请先执行: python3 -m pip install -r requirements.txt"
+  exit 1
 fi
 
 echo "🚀 开始整理 Chrome 书签..."
 echo "📄 输入文件: ${BOOKMARK_FILE}"
 echo "⚙️  配置文件: ${CONFIG_FILE}"
+
+if [ "${RESET_ALL}" = true ]; then
+  echo "🧹 清理模式: 删除全部中间产物和输出"
+  python3 scripts/reset_pipeline_state.py --config "${CONFIG_FILE}" --reset-all --source "${BOOKMARK_FILE}"
+elif [ "${CLEAR_FETCH_CACHE}" = true ]; then
+  echo "🧹 清理模式: 删除抓取缓存"
+  python3 scripts/reset_pipeline_state.py --config "${CONFIG_FILE}" --clear-fetch-cache --source "${BOOKMARK_FILE}"
+fi
 
 python3 scripts/1_copy_bookmark.py --config "${CONFIG_FILE}" --source "${BOOKMARK_FILE}"
 python3 scripts/2_parse_bookmarks.py --config "${CONFIG_FILE}"

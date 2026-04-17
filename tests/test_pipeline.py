@@ -9,7 +9,7 @@ SCRIPTS = ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from test_pipeline_support import build_metadata, write_enriched_fixture  # noqa: E402
-from scripts_compat import common_module, parse_bookmarks_module, classify_module, cluster_module, html_module, copy_module, fetch_module  # noqa: E402
+from scripts_compat import common_module, parse_bookmarks_module, classify_module, cluster_module, html_module, copy_module, fetch_module, reset_module  # noqa: E402
 
 
 def _bookmark(index, *, name, url, domain, category, folder, resource_type="文档", title="", description="", keywords="", content_preview=""):
@@ -42,6 +42,33 @@ def test_parse_bookmarks_deduplicates_urls():
     assert result["stats"]["duplicate_count"] == 1
     assert result["stats"]["duplicates"][0]["url"] == "https://docs.python.org/3/"
     assert "docs.python.org" in result["stats"]["top_domains"]
+
+
+def test_parse_bookmarks_normalizes_url_identity_but_keeps_distinct_fragments(tmp_path):
+    sample = tmp_path / "sample.html"
+    sample.write_text(
+        """
+        <!DOCTYPE NETSCAPE-Bookmark-file-1>
+        <DL><p>
+          <DT><A HREF="https://Example.com/docs#intro">Intro</A>
+          <DT><A HREF="https://example.com/docs#intro">Intro Duplicate</A>
+          <DT><A HREF="https://example.com/docs#advanced">Advanced</A>
+        </DL><p>
+        """,
+        encoding="utf-8",
+    )
+
+    result = parse_bookmarks_module.parse_bookmarks(sample)
+
+    assert result["stats"]["total_bookmarks"] == 2
+    assert result["stats"]["duplicate_count"] == 1
+    assert {bookmark["url"] for bookmark in result["bookmarks"]} == {
+        "https://Example.com/docs#intro",
+        "https://example.com/docs#advanced",
+    }
+    assert {bookmark["fetch_normalized_url"] for bookmark in result["bookmarks"]} == {
+        "https://example.com/docs",
+    }
 
 
 def test_copy_step_is_noop_for_same_file(tmp_path):
@@ -173,6 +200,71 @@ def test_fetch_normalize_metadata_classifies_review_categories():
     assert broken_md["link_health"]["reason_label"] == "HTTP 4xx/5xx"
 
 
+def test_trusted_access_policy_skips_review_and_reports_for_selected_domains(tmp_path):
+    review_policy = {
+        "trusted_access": {
+            "enabled": True,
+            "domain_suffixes": ["zhihu.com", "csdn.net", "github.com", "gitbook.com"],
+            "http_statuses": [403, 429],
+            "allow_reason_codes": ["timeout", "certificate", "other_error"],
+            "domain_rules": [
+                {
+                    "domain_suffixes": ["csdn.net", "csdn.com", "csdnimg.cn"],
+                    "http_statuses": [403, 404, 429, 520, 521, 522, 523, 524],
+                }
+            ],
+        }
+    }
+
+    trusted = fetch_module.apply_review_policy(
+        {"fetch_status": "broken", "status_code": 403, "error": "HTTP 403"},
+        "zhuanlan.zhihu.com",
+        review_policy,
+    )
+    assert trusted["link_health"]["reason_code"] == "trusted_access"
+    assert trusted["link_health"]["review_required"] is False
+    assert trusted["link_health"]["trusted_override"] is True
+    assert trusted["link_health"]["raw_reason_code"] == "http_error"
+
+    timeout = fetch_module.apply_review_policy(
+        {"fetch_status": "timeout", "error": "Request timeout"},
+        "blog.csdn.net",
+        review_policy,
+    )
+    assert timeout["link_health"]["trusted_override"] is True
+
+    trusted_csdn = fetch_module.apply_review_policy(
+        {"fetch_status": "broken", "status_code": 521, "error": "HTTP 521"},
+        "blog.csdn.net",
+        review_policy,
+    )
+    assert trusted_csdn["link_health"]["trusted_override"] is True
+    assert trusted_csdn["link_health"]["review_required"] is False
+
+    github_missing = fetch_module.apply_review_policy(
+        {"fetch_status": "broken", "status_code": 404, "error": "HTTP 404"},
+        "github.com",
+        review_policy,
+    )
+    assert github_missing["link_health"]["review_required"] is True
+
+    dns_failure = fetch_module.apply_review_policy(
+        {
+            "fetch_status": "error",
+            "error": "Cannot connect to host blog.csdn.net:443 ssl:default [nodename nor servname provided, or not known]",
+        },
+        "blog.csdn.net",
+        review_policy,
+    )
+    assert dns_failure["link_health"]["review_required"] is True
+
+    bookmark = {"id": "trusted", "name": "知乎文章", "url": "https://zhuanlan.zhihu.com/p/1", "domain": "zhuanlan.zhihu.com", "metadata": trusted}
+    review_report = tmp_path / "review.json"
+    broken_report = tmp_path / "broken.json"
+    assert fetch_module.export_review_report([bookmark], review_report, review_policy) == 0
+    assert fetch_module.export_broken_links_report([bookmark], broken_report, review_policy) == 0
+
+
 def test_fetch_step_reuses_successful_cache_and_retries_failures(tmp_path):
     input_file = tmp_path / "parsed.json"
     output_file = tmp_path / "enriched.json"
@@ -207,7 +299,7 @@ def test_fetch_step_reuses_successful_cache_and_retries_failures(tmp_path):
 
     calls = []
 
-    async def fake_process_batch(bookmarks, session, timeout, max_retries, proxy_options):
+    async def fake_process_batch(bookmarks, session, timeout, max_retries, proxy_options, review_policy=None):
         calls.extend(bookmark["id"] for bookmark in bookmarks)
         return [
             {
@@ -245,6 +337,140 @@ def test_fetch_step_reuses_successful_cache_and_retries_failures(tmp_path):
     assert result["stats"]["retried_count"] == 1
     assert result["bookmarks"][0]["metadata"]["title"] == "Cached"
     assert result["bookmarks"][1]["metadata"]["title"] == "Fetched"
+
+
+def test_fetch_step_reuses_trusted_cached_result_without_retry(tmp_path):
+    input_file = tmp_path / "parsed.json"
+    output_file = tmp_path / "enriched.json"
+    input_bookmarks = {
+        "bookmarks": [
+            {"id": "trusted", "name": "知乎文章", "url": "https://zhuanlan.zhihu.com/p/1", "domain": "zhuanlan.zhihu.com", "original_folder_path": ["知乎"]},
+        ]
+    }
+    input_file.write_text(json.dumps(input_bookmarks, ensure_ascii=False), encoding="utf-8")
+    cached = {
+        "bookmarks": [
+            {
+                "id": "trusted",
+                "name": "知乎文章",
+                "url": "https://zhuanlan.zhihu.com/p/1",
+                "domain": "zhuanlan.zhihu.com",
+                "original_folder_path": ["知乎"],
+                "metadata": fetch_module.normalize_metadata({"fetch_status": "broken", "status_code": 403, "error": "HTTP 403"}),
+            }
+        ]
+    }
+    output_file.write_text(json.dumps(cached, ensure_ascii=False), encoding="utf-8")
+
+    calls = []
+
+    async def fake_process_batch(bookmarks, session, timeout, max_retries, proxy_options, review_policy=None):
+        calls.extend(bookmark["id"] for bookmark in bookmarks)
+        return []
+
+    original = fetch_module.process_batch
+    fetch_module.process_batch = fake_process_batch
+    try:
+        result = asyncio.run(
+            fetch_module.fetch_webpage_info_async(
+                input_file,
+                output_file,
+                {
+                    "concurrent_limit": 5,
+                    "timeout": 1,
+                    "delay": 0,
+                    "batch_size": 10,
+                    "max_retries": 0,
+                    "force_refetch": False,
+                    "user_agent": "test-agent",
+                    "proxy": {"enabled": False, "trust_env": False, "http_proxy": None, "https_proxy": None, "all_proxy": None},
+                    "review_policy": {
+                        "trusted_access": {
+                            "enabled": True,
+                            "domain_suffixes": ["zhihu.com"],
+                            "http_statuses": [403],
+                            "allow_reason_codes": [],
+                        }
+                    },
+                },
+                common_module.configure_logging(common_module.PipelineConfig.load(ROOT / "skill_config.json"), "INFO"),
+            )
+        )
+    finally:
+        fetch_module.process_batch = original
+
+    assert calls == []
+    assert result["stats"]["reused_count"] == 1
+    assert result["stats"]["retried_count"] == 0
+    assert result["stats"]["trusted_override_count"] == 1
+    assert result["bookmarks"][0]["metadata"]["link_health"]["review_required"] is False
+
+
+def test_fetch_step_reuses_cache_across_id_changes_and_preserves_bookmark_rows(tmp_path):
+    input_file = tmp_path / "parsed.json"
+    output_file = tmp_path / "enriched.json"
+    input_bookmarks = {
+        "bookmarks": [
+            {
+                "id": "new-a",
+                "name": "Section A",
+                "url": "https://example.com/docs#a",
+                "fetch_normalized_url": "https://example.com/docs",
+                "domain": "example.com",
+                "original_folder_path": ["Docs"],
+            },
+            {
+                "id": "new-b",
+                "name": "Section B",
+                "url": "https://example.com/docs#b",
+                "fetch_normalized_url": "https://example.com/docs",
+                "domain": "example.com",
+                "original_folder_path": ["Docs"],
+            },
+        ]
+    }
+    input_file.write_text(json.dumps(input_bookmarks, ensure_ascii=False), encoding="utf-8")
+    cached = {
+        "bookmarks": [
+            {
+                "id": "old-id",
+                "name": "Legacy",
+                "url": "https://example.com/docs",
+                "fetch_normalized_url": "https://example.com/docs",
+                "domain": "example.com",
+                "original_folder_path": ["Docs"],
+                "metadata": build_metadata("Cached Docs", "", "", "Cached Docs", "Cached Docs"),
+            }
+        ]
+    }
+    output_file.write_text(json.dumps(cached, ensure_ascii=False), encoding="utf-8")
+
+    result = asyncio.run(
+        fetch_module.fetch_webpage_info_async(
+            input_file,
+            output_file,
+            {
+                "concurrent_limit": 2,
+                "timeout": 1,
+                "delay": 0,
+                "batch_size": 10,
+                "max_retries": 0,
+                "force_refetch": False,
+                "user_agent": "test-agent",
+                "proxy": {"enabled": False, "trust_env": False, "http_proxy": None, "https_proxy": None, "all_proxy": None},
+            },
+            common_module.configure_logging(common_module.PipelineConfig.load(ROOT / "skill_config.json"), "INFO"),
+        )
+    )
+
+    assert result["stats"]["reused_count"] == 2
+    assert result["stats"]["retried_count"] == 0
+    assert [bookmark["name"] for bookmark in result["bookmarks"]] == ["Section A", "Section B"]
+    assert [bookmark["url"] for bookmark in result["bookmarks"]] == [
+        "https://example.com/docs#a",
+        "https://example.com/docs#b",
+    ]
+    assert all(bookmark["metadata"]["title"] == "Cached Docs" for bookmark in result["bookmarks"])
 
 
 def test_cluster_and_generate_html_include_review_hierarchy():
@@ -664,6 +890,31 @@ def test_classifier_distinguishes_resource_types_within_same_topic():
     assert "社区" in blog_classification["quality_signals"]
 
 
+def test_clusterer_prefers_classification_resource_type_when_metadata_lacks_it():
+    clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2)
+    bookmark = {
+        "id": "bookmark_type_gap",
+        "name": "Alignment Notes",
+        "url": "https://example.com/alignment-notes",
+        "domain": "example.com",
+        "original_folder_path": ["Research"],
+        "metadata": {
+            "title": "Alignment Notes",
+            "description": "Interpretability and evaluation notes",
+            "content_preview": "Interpretability and evaluation notes",
+        },
+        "classification": {
+            "category": "机器学习/AI",
+            "resource_type": "论文",
+            "all_scores": {"机器学习/AI": {"total": 88}},
+        },
+    }
+
+    feature = clusterer.build_feature_set(bookmark)
+
+    assert feature.resource_type == "论文"
+    assert "论文" in feature.resource_types
+
 
 def test_classifier_exports_open_topic_only_bookmarks_for_confirmation(tmp_path):
     rules_file = ROOT / "data" / "category_rules.json"
@@ -750,7 +1001,7 @@ def test_same_label_clusters_are_merged_instead_of_suffix_spam():
     ]
     hierarchy = clusterer.build_hierarchy(bookmarks, "编程/Python Web", threshold=1)
     names = sorted(hierarchy["subcategories"].keys())
-    assert names == ["编程/Python Web/学习/FastAPI"]
+    assert names == ["编程/Python Web/FastAPI"]
     assert hierarchy["subcategories"][names[0]]["count"] == 4
 
 
@@ -771,6 +1022,91 @@ def test_build_root_hierarchy_preserves_leaf_categories_without_suffix_spam():
     assert database["category"] == "数据库"
     assert programming["count"] == 2
     assert database["count"] == 2
-    assert {bookmark["name"] for bookmark in programming["bookmarks"]} == {"Python 官方文档", "Rust 官方文档"}
+    assert set(programming["subcategories"]) == {"Python", "Rust"}
+    assert programming["bookmarks"] == []
+    assert database["subcategories"]["PostgreSQL"]["count"] == 2
     assert all(not name.endswith(")") for name in programming.get("subcategories", {}))
     assert all(not name.endswith(")") for name in database.get("subcategories", {}))
+
+
+def test_build_display_hierarchy_groups_top_level_roots_for_human_browsing():
+    clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2)
+    bookmarks = [
+        _bookmark(1, name="Python 官方文档", url="https://docs.python.org/3/", domain="docs.python.org", category="编程语言/Python", folder=["学习", "Python"]),
+        _bookmark(2, name="Rust 官方文档", url="https://doc.rust-lang.org/book/", domain="doc.rust-lang.org", category="编程语言/Rust", folder=["学习", "Rust"]),
+        _bookmark(3, name="PostgreSQL Docs", url="https://postgresql.org/docs", domain="postgresql.org", category="数据库/PostgreSQL", folder=["学习", "PostgreSQL"]),
+        _bookmark(4, name="PostgreSQL Wiki", url="https://wiki.postgresql.org", domain="wiki.postgresql.org", category="数据库/PostgreSQL", folder=["学习", "PostgreSQL"]),
+    ]
+
+    root_hierarchy = cluster_module.build_root_hierarchy(clusterer, bookmarks, threshold=20)
+    display_hierarchy = cluster_module.build_display_hierarchy(
+        clusterer,
+        root_hierarchy,
+        common_module.DEFAULT_ROOT_GROUPS,
+        common_module.DEFAULT_DISPLAY_OPTIONS,
+    )
+
+    assert list(display_hierarchy) == ["数据库与存储", "编程开发"]
+    assert set(display_hierarchy["数据库与存储"]["subcategories"]) == {"PostgreSQL"}
+    assert set(display_hierarchy["编程开发"]["subcategories"]) == {"Python", "Rust"}
+
+    html = html_module.BookmarkHTMLGenerator().generate_html(display_hierarchy)
+    assert html.find("数据库与存储") < html.find("编程开发")
+
+
+def test_reset_pipeline_outputs_keeps_source_bookmark_file(tmp_path):
+    source = tmp_path / "bookmarks.html"
+    source.write_text("source", encoding="utf-8")
+    config_file = tmp_path / "skill_config.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "input": {
+                    "bookmark_file": "bookmarks.html",
+                    "rules_file": str(ROOT / "data" / "category_rules.json"),
+                },
+                "pipeline": {
+                    "copied_bookmark_file": "bookmarks.html",
+                    "parsed_file": "data/parsed.json",
+                    "classified_file": "data/classified.json",
+                    "clustering_file": "data/clustering.json",
+                },
+                "fetch_options": {
+                    "cache_file": "data/enriched.json",
+                },
+                "output": {
+                    "html_file": "output/organized.html",
+                    "reports_directory": "output/reports",
+                },
+                "logging": {
+                    "file": "logs/app.log",
+                    "console": False,
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    config = common_module.PipelineConfig.load(config_file)
+    logger = common_module.configure_logging(config, "INFO")
+
+    config.paths.parsed_file.parent.mkdir(parents=True, exist_ok=True)
+    config.paths.parsed_file.write_text("{}", encoding="utf-8")
+    config.paths.enriched_file.write_text("{}", encoding="utf-8")
+    config.paths.classified_file.write_text("{}", encoding="utf-8")
+    config.paths.clustering_file.write_text("{}", encoding="utf-8")
+    config.paths.html_output.parent.mkdir(parents=True, exist_ok=True)
+    config.paths.html_output.write_text("html", encoding="utf-8")
+    config.paths.reports_dir.mkdir(parents=True, exist_ok=True)
+    (config.paths.reports_dir / "review.json").write_text("{}", encoding="utf-8")
+
+    removed = reset_module.reset_pipeline_outputs(config, logger, protect={source.resolve()})
+
+    assert removed >= 4
+    assert source.exists()
+    assert not config.paths.parsed_file.exists()
+    assert not config.paths.enriched_file.exists()
+    assert not config.paths.classified_file.exists()
+    assert not config.paths.clustering_file.exists()
+    assert not config.paths.html_output.exists()
+    assert not config.paths.reports_dir.exists()

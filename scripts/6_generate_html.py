@@ -40,7 +40,14 @@ class BookmarkHTMLGenerator:
             "bookmarks": node_data.get("bookmarks") or [],
             "count": node_data.get("count", len(node_data.get("bookmarks", []))),
             "node_type": node_data.get("node_type", "mixed"),
+            "display_order": node_data.get("display_order"),
         }
+
+    @staticmethod
+    def sort_key(item: dict) -> tuple[int, int, str]:
+        order = item.get("display_order")
+        normalized_order = order if isinstance(order, int) else 10**6
+        return (normalized_order, -item.get("count", 0), item.get("name", ""))
 
     def generate_bookmark_item(self, bookmark: dict, level: int = 3) -> str:
         self.bookmark_count += 1
@@ -58,7 +65,7 @@ class BookmarkHTMLGenerator:
         add_date = str(int(datetime.now().timestamp()))
         html = f'{indent}<DT><H3 ADD_DATE="{add_date}">{self.escape_html(node.get("name", "未命名目录"))}</H3>\n'
         html += f"{indent}<DL><p>\n"
-        children = sorted(node.get("children", []), key=lambda item: (-item.get("count", 0), item.get("name", "")))
+        children = sorted(node.get("children", []), key=self.sort_key)
         for child in children:
             html += self.generate_folder(child, level=level + 1)
         for bookmark in node.get("bookmarks", []):
@@ -81,7 +88,7 @@ class BookmarkHTMLGenerator:
                 other_category = node
             else:
                 categories.append(node)
-        categories.sort(key=lambda item: (-item["count"], item["name"]))
+        categories.sort(key=self.sort_key)
 
         for node in categories:
             html += self.generate_folder(node)
@@ -89,7 +96,7 @@ class BookmarkHTMLGenerator:
             html += self.generate_folder(other_category)
         if review_hierarchy:
             review_nodes = [self.normalize_node(category, data) for category, data in review_hierarchy.items()]
-            review_nodes.sort(key=lambda item: (-item["count"], item["name"]))
+            review_nodes.sort(key=self.sort_key)
             for node in review_nodes:
                 html += self.generate_folder(node)
 

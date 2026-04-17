@@ -25,8 +25,39 @@
     "max_retries": 2,
     "force_refetch": false,
     "cache_file": "data/bookmarks_with_info.json",
-    "check_broken_links": true,
-    "user_agent": "BookmarksOrganizer/1.1 (+https://example.com)",
+    "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+    "review_policy": {
+      "trusted_access": {
+        "enabled": true,
+        "domain_suffixes": [
+          "zhihu.com",
+          "csdn.net",
+          "github.com",
+          "gitbook.com",
+          "gitbook.io"
+        ],
+        "http_statuses": [403, 406, 429],
+        "allow_reason_codes": ["timeout", "certificate", "other_error"],
+        "domain_rules": [
+          {
+            "domain_suffixes": ["csdn.net", "csdn.com", "csdnimg.cn"],
+            "http_statuses": [403, 404, 406, 429, 451, 500, 502, 503, 504, 520, 521, 522, 523, 524]
+          },
+          {
+            "domain_suffixes": ["zhihu.com"],
+            "http_statuses": [403, 404, 406, 429, 451, 500, 502, 503, 504, 520, 521, 522, 523, 524]
+          },
+          {
+            "domain_suffixes": ["gitbook.com", "gitbook.io"],
+            "http_statuses": [403, 404, 406, 429, 451, 500, 502, 503, 504, 520, 521, 522, 523, 524]
+          },
+          {
+            "domain_suffixes": ["github.com"],
+            "http_statuses": [403, 406, 429, 451, 500, 502, 503, 504, 520, 521, 522, 523, 524]
+          }
+        ]
+      }
+    },
     "proxy": {
       "enabled": false,
       "trust_env": false,
@@ -47,7 +78,22 @@
   "clustering_options": {
     "min_cluster_size": 10,
     "max_keywords": 3,
-    "max_bookmarks_without_clustering": 20
+    "max_bookmarks_without_clustering": 20,
+    "domain_split_min_size": 4,
+    "root_groups": [
+      {"name": "数据库与存储", "roots": ["数据库"]},
+      {"name": "编程开发", "roots": ["编程语言", "前端开发", "后端开发", "网络编程", "配置开发环境"]},
+      {"name": "基础设施与运维", "roots": ["分布式系统", "云服务", "DevOps", "Linux系统", "安全"]},
+      {"name": "AI与研究", "roots": ["机器学习", "算法与数据结构", "论文与研究"]},
+      {"name": "工程工具与资源", "roots": ["开发工具", "文档与教程", "开源项目", "技术博客", "测试"]},
+      {"name": "实验与杂项", "roots": ["实验项目", "其他/未分类"]}
+    ],
+    "display": {
+      "max_depth": 3,
+      "collapse_single_child": true,
+      "prefer_human_labels": true,
+      "fallback_group_name": "实验与杂项"
+    }
   },
   "logging": {
     "level": "INFO",

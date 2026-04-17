@@ -2,6 +2,7 @@
 """步骤5: 聚类分析与层级构建。"""
 from __future__ import annotations
 
+import copy
 import json
 import re
 from collections import Counter, defaultdict
@@ -63,6 +64,19 @@ URL_TYPE_HINTS = {
     "papers": "论文",
     "arxiv": "论文",
 }
+GENERIC_FOLDER_NAMES = {
+    "其他", "未分类", "学习", "收藏", "书签", "资料", "文档", "教程",
+    "docs", "doc", "documentation", "blog", "blogs", "article", "articles",
+    "misc", "general", "home", "index", "www",
+}
+DOMAIN_DISPLAY_NAMES = {
+    "zhihu.com": "知乎",
+    "csdn.net": "CSDN",
+    "github.com": "GitHub",
+    "gitbook.com": "GitBook",
+    "gitbook.io": "GitBook",
+}
+DISPLAY_ORDER_FALLBACK = 10**6
 
 
 @dataclass
@@ -119,6 +133,14 @@ class BookmarkClusterer:
         self.max_depth = max_depth
         self.merge_small_nodes_threshold = merge_small_nodes_threshold or max(2, min_cluster_size // 2)
         self.domain_split_min_size = domain_split_min_size
+        self._feature_cache: dict[tuple[str, str], BookmarkFeatures] = {}
+
+    @staticmethod
+    def _bookmark_identity(bookmark: dict) -> tuple[str, str]:
+        return (
+            str(bookmark.get("id", "")),
+            str(bookmark.get("fetch_normalized_url") or bookmark.get("url", "")),
+        )
 
     @staticmethod
     def _normalize_resource_type(value: str) -> str:
@@ -133,6 +155,130 @@ class BookmarkClusterer:
         if labels[-1] in {"cn", "uk", "jp", "au"} and len(labels) >= 3:
             return ".".join(labels[-3:])
         return ".".join(labels[-2:])
+
+    @staticmethod
+    def _normalized_label_key(value: str) -> str:
+        return re.sub(r"[\s_/.-]+", "", (value or "").strip().lower())
+
+    def _human_label(self, value: str) -> str:
+        text = re.sub(r"\s+", " ", (value or "").strip())
+        if not text:
+            return ""
+        segments = [segment.strip() for segment in re.split(r"\s*[|｜]\s*|\s+[—–-]\s+", text) if segment.strip()]
+        if segments:
+            text = segments[0]
+        return text.strip(" /._-")
+
+    @staticmethod
+    def _is_domain_like(value: str) -> bool:
+        return bool(re.fullmatch(r"[a-z0-9.-]+\.[a-z]{2,}", (value or "").strip().lower()))
+
+    def _is_generic_label(self, value: str, category: str = "") -> bool:
+        label = self._human_label(value)
+        if not label:
+            return True
+        label_key = self._normalized_label_key(label)
+        if label_key in {self._normalized_label_key(item) for item in GENERIC_FOLDER_NAMES}:
+            return True
+        if self._is_domain_like(label):
+            return True
+        category_keys = {self._normalized_label_key(part) for part in category.split("/") if part}
+        return label_key in category_keys
+
+    def _domain_display_name(self, domain: str) -> str:
+        registered = self._registered_domain(domain or "")
+        if not registered:
+            return ""
+        if registered in DOMAIN_DISPLAY_NAMES:
+            return DOMAIN_DISPLAY_NAMES[registered]
+        label = registered.split(".")[0]
+        if not label:
+            return registered
+        if len(label) <= 4:
+            return label.upper()
+        return label.capitalize()
+
+    def _category_leaf_label(self, category: str, root_category: str | None = None) -> str:
+        parts = [part for part in category.split("/") if part]
+        if root_category and parts and parts[0] == root_category:
+            parts = parts[1:]
+        if not parts:
+            return ""
+        cleaned_parts = [self._human_label(part) for part in parts if self._human_label(part)]
+        if not cleaned_parts:
+            return ""
+        if len(cleaned_parts) == 1:
+            return cleaned_parts[0]
+        return " / ".join(cleaned_parts[-2:])
+
+    def _folder_display_label(self, best_folder: Sequence[str], category: str) -> str:
+        for part in reversed(best_folder):
+            label = self._human_label(part)
+            if not self._is_generic_label(label, category):
+                return label
+        return ""
+
+    def _dominant_category_leaf(self, bookmarks: List[dict], category: str) -> str:
+        counter: Counter[str] = Counter()
+        root_category = category.split("/")[0] if category else ""
+        for bookmark in bookmarks:
+            bookmark_category = bookmark.get("classification", {}).get("category", "")
+            leaf = self._category_leaf_label(bookmark_category, root_category)
+            if leaf and not self._is_generic_label(leaf, category):
+                counter[leaf] += 1
+        return counter.most_common(1)[0][0] if counter else ""
+
+    def _dominant_site_label(self, bookmarks: List[dict], category: str) -> str:
+        counter: Counter[str] = Counter()
+        for bookmark in bookmarks:
+            metadata = bookmark.get("metadata", {})
+            candidates = [
+                metadata.get("site_signals", {}).get("site_name"),
+                metadata.get("page_signals", {}).get("og:site_name"),
+                metadata.get("site_profile", {}).get("site", {}).get("site_name"),
+            ]
+            for candidate in candidates:
+                label = self._human_label(candidate or "")
+                if label and not self._is_generic_label(label, category):
+                    counter[label] += 1
+                    break
+        return counter.most_common(1)[0][0] if counter else ""
+
+    def _dominant_domain_label(self, bookmarks: List[dict]) -> str:
+        counter: Counter[str] = Counter()
+        for bookmark in bookmarks:
+            domain = self.build_feature_set(bookmark).registered_domain
+            label = self._domain_display_name(domain)
+            if label:
+                counter[label] += 1
+        return counter.most_common(1)[0][0] if counter else ""
+
+    def _cluster_display_name(
+        self,
+        bookmarks: List[dict],
+        category: str,
+        best_folder: Sequence[str] | None = None,
+        folder_quality: float = 0.0,
+    ) -> str:
+        if best_folder and folder_quality >= 0.68:
+            folder_label = self._folder_display_label(best_folder, category)
+            if folder_label:
+                return folder_label
+
+        for candidate in (
+            self._dominant_category_leaf(bookmarks, category),
+            self._dominant_site_label(bookmarks, category),
+            self._dominant_domain_label(bookmarks),
+        ):
+            if candidate and not self._is_generic_label(candidate, category):
+                return candidate
+
+        for token in self._representative_tokens(bookmarks, limit=4):
+            candidate = self.clean_topic_token(token)
+            if candidate and not self._is_generic_label(candidate, category):
+                return candidate
+
+        return "其他"
 
     def extract_keywords(self, text: str) -> List[str]:
         normalized = text.lower().replace("-", " ").replace("_", " ")
@@ -165,6 +311,12 @@ class BookmarkClusterer:
         return topics, primary or "其他/未分类"
 
     def build_feature_set(self, bookmark: dict) -> BookmarkFeatures:
+        cache_key = self._bookmark_identity(bookmark)
+        cached = self._feature_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        classification = bookmark.get("classification", {})
         metadata = bookmark.get("metadata", {})
         domain = (bookmark.get("domain") or urlparse(bookmark.get("url", "")).netloc).lower()
         registered_domain = self._registered_domain(domain) if domain else ""
@@ -181,7 +333,7 @@ class BookmarkClusterer:
         topics, primary_topic = self._collect_topics(bookmark, title_tokens, folder_tokens, path_tokens)
 
         resource_type_candidates = set()
-        explicit_type = metadata.get("resource_type") or bookmark.get("resource_type")
+        explicit_type = classification.get("resource_type") or metadata.get("resource_type") or bookmark.get("resource_type")
         if explicit_type:
             resource_type_candidates.add(self._normalize_resource_type(explicit_type))
         resource_type_candidates.update(page_type_hints)
@@ -202,7 +354,7 @@ class BookmarkClusterer:
 
         text_tokens = title_tokens | set(self.extract_keywords(metadata.get("content_preview", "")))
         domain_tokens = set(self.extract_keywords(domain.replace(".", " ")))
-        return BookmarkFeatures(
+        feature = BookmarkFeatures(
             topics=topics,
             resource_types=resource_type_candidates,
             domain_tokens=domain_tokens,
@@ -217,6 +369,8 @@ class BookmarkClusterer:
             registered_domain=registered_domain,
             original_folders=bookmark.get("original_folder_path", []),
         )
+        self._feature_cache[cache_key] = feature
+        return feature
 
     @staticmethod
     def _jaccard(left: set[str], right: set[str]) -> float:
@@ -255,6 +409,50 @@ class BookmarkClusterer:
         if metrics["topic_overlap"] < 0.2 and metrics["text_similarity"] < 0.15:
             score *= 0.6
         return score
+
+    @staticmethod
+    def _feature_overlap_tokens(feature: BookmarkFeatures) -> set[str]:
+        return feature.topics | feature.path_tokens | feature.folder_tokens
+
+    def _comparison_bucket_keys(self, feature: BookmarkFeatures) -> set[str]:
+        keys = set()
+        if feature.primary_topic:
+            keys.add(f"primary:{feature.primary_topic}")
+        if feature.registered_domain:
+            keys.add(f"domain:{feature.registered_domain}")
+        for token in sorted(feature.folder_tokens)[:2]:
+            keys.add(f"folder:{token}")
+        for token in sorted(self._feature_overlap_tokens(feature))[:6]:
+            keys.add(f"token:{token}")
+        return keys
+
+    def _candidate_pairs(self, features: List[BookmarkFeatures]) -> set[tuple[int, int]]:
+        if len(features) <= 1:
+            return set()
+
+        buckets: dict[str, list[int]] = defaultdict(list)
+        for index, feature in enumerate(features):
+            for key in self._comparison_bucket_keys(feature):
+                buckets[key].append(index)
+
+        candidate_pairs: set[tuple[int, int]] = set()
+        for indices in buckets.values():
+            if len(indices) < 2:
+                continue
+            for left_pos, left_index in enumerate(indices):
+                for right_index in indices[left_pos + 1:]:
+                    if left_index < right_index:
+                        candidate_pairs.add((left_index, right_index))
+                    else:
+                        candidate_pairs.add((right_index, left_index))
+
+        if candidate_pairs:
+            return candidate_pairs
+        return {
+            (left, right)
+            for left in range(len(features))
+            for right in range(left + 1, len(features))
+        }
 
     @staticmethod
     def normalize_name(name: str) -> str:
@@ -302,27 +500,39 @@ class BookmarkClusterer:
             existing["bookmarks"].extend(child.get("bookmarks", []))
             existing["children"].extend(child.get("children", []))
             existing["node_type"] = existing["node_type"] if existing["node_type"] == child.get("node_type") else "mixed"
+            existing["display_order"] = min(
+                existing.get("display_order", DISPLAY_ORDER_FALLBACK),
+                child.get("display_order", DISPLAY_ORDER_FALLBACK),
+            )
             self.refresh_count(existing)
 
-        node["children"] = sorted(merged_children.values(), key=lambda item: (-item["count"], item["name"]))
+        node["children"] = sorted(
+            merged_children.values(),
+            key=lambda item: (
+                item.get("display_order", DISPLAY_ORDER_FALLBACK),
+                -item["count"],
+                item["name"],
+            ),
+        )
 
         low_value_bookmarks = []
         retained_children = []
-        low_value_children = [
-            child for child in node["children"]
-            if child["count"] <= self.merge_small_nodes_threshold and not child.get("children")
-        ]
-        protected_child = low_value_children[0] if len(low_value_children) == len(node["children"]) and low_value_children else None
-        for child in node["children"]:
-            if child is protected_child:
-                retained_children.append(child)
-            elif child["count"] <= self.merge_small_nodes_threshold and not child.get("children"):
-                low_value_bookmarks.extend(child.get("bookmarks", []))
-            else:
-                retained_children.append(child)
-        node["children"] = retained_children
-        if low_value_bookmarks:
-            node.setdefault("bookmarks", []).extend(low_value_bookmarks)
+        if not node.get("preserve_children"):
+            low_value_children = [
+                child for child in node["children"]
+                if child["count"] <= self.merge_small_nodes_threshold and not child.get("children")
+            ]
+            protected_child = low_value_children[0] if len(low_value_children) == len(node["children"]) and low_value_children else None
+            for child in node["children"]:
+                if child is protected_child:
+                    retained_children.append(child)
+                elif child["count"] <= self.merge_small_nodes_threshold and not child.get("children"):
+                    low_value_bookmarks.extend(child.get("bookmarks", []))
+                else:
+                    retained_children.append(child)
+            node["children"] = retained_children
+            if low_value_bookmarks:
+                node.setdefault("bookmarks", []).extend(low_value_bookmarks)
 
         while len(node["children"]) == 1 and not node.get("bookmarks") and not is_root:
             only_child = node["children"][0]
@@ -336,6 +546,39 @@ class BookmarkClusterer:
             node["bookmarks"] = only_child.get("bookmarks", [])
 
         return self.refresh_count(node)
+
+    def _normalize_hierarchy_node(self, node_name: str, payload: dict) -> dict:
+        node = {
+            **{key: value for key, value in payload.items() if key != "subcategories"},
+            "name": payload.get("name", node_name),
+            "bookmarks": list(payload.get("bookmarks") or []),
+            "children": [
+                self._normalize_hierarchy_node(child_name, child_payload)
+                for child_name, child_payload in (payload.get("subcategories") or {}).items()
+            ],
+            "node_type": payload.get("node_type", "mixed"),
+        }
+        return self.refresh_count(node)
+
+    def _denormalize_hierarchy_node(self, node: dict) -> dict:
+        payload = {
+            key: value
+            for key, value in node.items()
+            if key != "children"
+        }
+        payload["subcategories"] = {
+            child.get("name", "未命名目录"): self._denormalize_hierarchy_node(child)
+            for child in node.get("children", [])
+        }
+        payload["count"] = node.get("count", len(payload.get("bookmarks", [])))
+        return payload
+
+    def optimize_hierarchy_payload(self, node_name: str, payload: dict, *, is_root: bool = False) -> dict:
+        normalized = self._normalize_hierarchy_node(node_name, payload)
+        optimized = self.optimize_tree(normalized, is_root=is_root)
+        optimized_payload = self._denormalize_hierarchy_node(optimized)
+        optimized_payload["category"] = payload.get("category", node_name)
+        return optimized_payload
 
     def cluster_by_keywords(self, bookmarks: List[dict]) -> Dict[str, List[dict]]:
         keyword_groups = defaultdict(list)
@@ -369,10 +612,9 @@ class BookmarkClusterer:
         if not bookmarks:
             return []
         dsu = DisjointSet(len(bookmarks))
-        for left in range(len(bookmarks)):
-            for right in range(left + 1, len(bookmarks)):
-                if self.similarity_score(features[left], features[right]) >= threshold:
-                    dsu.union(left, right)
+        for left, right in sorted(self._candidate_pairs(features)):
+            if self.similarity_score(features[left], features[right]) >= threshold:
+                dsu.union(left, right)
         grouped: dict[int, list[dict]] = defaultdict(list)
         for index, bookmark in enumerate(bookmarks):
             grouped[dsu.find(index)].append(bookmark)
@@ -387,10 +629,9 @@ class BookmarkClusterer:
         domain_score = domain_concentration[0][1] / len(features) if domain_concentration else 0.0
         mean_text_overlap = 0.0
         comparisons = 0
-        for left in range(len(features)):
-            for right in range(left + 1, len(features)):
-                mean_text_overlap += self._jaccard(features[left].text_tokens | features[left].topics, features[right].text_tokens | features[right].topics)
-                comparisons += 1
+        for left, right in self._candidate_pairs(features):
+            mean_text_overlap += self._jaccard(features[left].text_tokens | features[left].topics, features[right].text_tokens | features[right].topics)
+            comparisons += 1
         pairwise = mean_text_overlap / comparisons if comparisons else 1.0
         return topic_purity * 0.35 + type_purity * 0.2 + domain_score * 0.15 + pairwise * 0.3
 
@@ -522,6 +763,11 @@ class BookmarkClusterer:
         if existing is None:
             subcategories[name] = payload
             return
+        existing["name"] = existing.get("name", payload.get("name", name))
+        existing["display_order"] = min(
+            existing.get("display_order", DISPLAY_ORDER_FALLBACK),
+            payload.get("display_order", DISPLAY_ORDER_FALLBACK),
+        )
         existing["bookmarks"].extend(payload.get("bookmarks", []))
         existing["count"] = len(existing["bookmarks"])
         existing["representative_tokens"] = self._representative_tokens(existing["bookmarks"])
@@ -556,9 +802,23 @@ class BookmarkClusterer:
 
     def _fallback_clusters(self, bookmarks: List[dict], category: str) -> Dict:
         domain_clusters = self.cluster_by_domain(bookmarks)
-        if len(domain_clusters) > 1:
-            subcategories = {
-                f"{category}/{domain}": {
+        large_domain_clusters = {
+            domain: group
+            for domain, group in domain_clusters.items()
+            if len(group) >= self.domain_split_min_size
+        }
+        other_domain_bookmarks = [
+            bookmark
+            for domain, group in domain_clusters.items()
+            if domain not in large_domain_clusters
+            for bookmark in group
+        ]
+        if large_domain_clusters:
+            subcategories: Dict[str, Dict] = {}
+            for domain, group in sorted(large_domain_clusters.items()):
+                display_name = self._dominant_site_label(group, category) or self._domain_display_name(domain) or self._cluster_display_name(group, category)
+                payload = {
+                    "name": display_name,
                     "bookmarks": group,
                     "count": len(group),
                     "cluster_reason": "fallback: domain clustering",
@@ -567,12 +827,45 @@ class BookmarkClusterer:
                     "source_folder_quality_score": 0.0,
                     "merge_from_categories": sorted({bookmark.get("classification", {}).get("category", "") for bookmark in group if bookmark.get("classification")}),
                 }
-                for domain, group in domain_clusters.items()
-            }
+                self._merge_named_subcategory(subcategories, f"{category}/{display_name}", payload)
+            if other_domain_bookmarks:
+                display_name = self._cluster_display_name(other_domain_bookmarks, category)
+                payload = {
+                    "name": display_name,
+                    "bookmarks": other_domain_bookmarks,
+                    "count": len(other_domain_bookmarks),
+                    "cluster_reason": "fallback: remaining small domain groups",
+                    "representative_tokens": self._representative_tokens(other_domain_bookmarks),
+                    "source_folder_reused": False,
+                    "source_folder_quality_score": 0.0,
+                    "merge_from_categories": sorted({bookmark.get("classification", {}).get("category", "") for bookmark in other_domain_bookmarks if bookmark.get("classification")}),
+                }
+                self._merge_named_subcategory(subcategories, f"{category}/{display_name}", payload)
+            return {"category": category, "subcategories": subcategories, "bookmarks": [], "count": len(bookmarks)}
+        if len(domain_clusters) > 1:
+            subcategories: Dict[str, Dict] = {}
+            for domain, group in sorted(domain_clusters.items()):
+                display_name = self._dominant_site_label(group, category) or self._domain_display_name(domain) or self._cluster_display_name(group, category)
+                payload = {
+                    "name": display_name,
+                    "bookmarks": group,
+                    "count": len(group),
+                    "cluster_reason": "fallback: domain clustering",
+                    "representative_tokens": self._representative_tokens(group),
+                    "source_folder_reused": False,
+                    "source_folder_quality_score": 0.0,
+                    "merge_from_categories": sorted({bookmark.get("classification", {}).get("category", "") for bookmark in group if bookmark.get("classification")}),
+                }
+                self._merge_named_subcategory(subcategories, f"{category}/{display_name}", payload)
             return {"category": category, "subcategories": subcategories, "bookmarks": [], "count": len(bookmarks)}
         keyword_clusters = self.cluster_by_keywords(bookmarks)
-        subcategories = {
-            f"{category}/{name}": {
+        subcategories: Dict[str, Dict] = {}
+        for name, group in keyword_clusters.items():
+            display_name = self._human_label(name)
+            if self._is_generic_label(display_name, category):
+                display_name = self._cluster_display_name(group, category)
+            payload = {
+                "name": display_name,
                 "bookmarks": group,
                 "count": len(group),
                 "cluster_reason": "fallback: keyword clustering",
@@ -581,8 +874,7 @@ class BookmarkClusterer:
                 "source_folder_quality_score": 0.0,
                 "merge_from_categories": sorted({bookmark.get("classification", {}).get("category", "") for bookmark in group if bookmark.get("classification")}),
             }
-            for name, group in keyword_clusters.items()
-        }
+            self._merge_named_subcategory(subcategories, f"{category}/{display_name}", payload)
         return {"category": category, "subcategories": subcategories, "bookmarks": [], "count": len(bookmarks)}
 
     def build_hierarchy(self, bookmarks: List[dict], category: str, threshold: int = 20) -> Dict:
@@ -613,17 +905,14 @@ class BookmarkClusterer:
             if len(cluster) < 2:
                 ungrouped.extend(cluster)
                 continue
-            label = self._normalize_cluster_label(category, self._derive_cluster_label(cluster, category), cluster)
             folder_counter = Counter(tuple(bookmark.get("original_folder_path", [])) for bookmark in cluster if bookmark.get("original_folder_path"))
             best_folder = list(folder_counter.most_common(1)[0][0]) if folder_counter else []
             folder_quality = self._folder_quality_score(cluster)
             source_folder_reused = bool(best_folder and folder_quality >= 0.68)
-            if source_folder_reused:
-                display_name = "/".join(best_folder[-2:]) if best_folder else label.split("/")[-1]
-                subcategory_name = f"{category}/{display_name}"
-            else:
-                subcategory_name = label if "/" in label else f"{category}/{label}"
+            display_name = self._cluster_display_name(cluster, category, best_folder, folder_quality)
+            subcategory_name = f"{category}/{display_name}"
             payload = {
+                "name": display_name,
                 "bookmarks": cluster,
                 "count": len(cluster),
                 "cluster_reason": self._build_cluster_reason(cluster),
@@ -653,17 +942,148 @@ def root_category_for(bookmark: dict) -> str:
     return category.split("/")[0] if "/" in category else category
 
 
+def category_path_for(bookmark: dict) -> str:
+    return bookmark.get("classification", {}).get("category", "") or "其他/未分类"
+
+
 def build_root_hierarchy(clusterer: BookmarkClusterer, bookmarks: List[dict], threshold: int) -> dict[str, dict]:
-    buckets: dict[str, list[dict]] = defaultdict(list)
+    buckets: dict[str, dict[str, list[dict]]] = defaultdict(lambda: defaultdict(list))
     for bookmark in bookmarks:
-        buckets[root_category_for(bookmark)].append(bookmark)
+        buckets[root_category_for(bookmark)][category_path_for(bookmark)].append(bookmark)
 
     hierarchy: dict[str, dict] = {}
-    for root_category, group in sorted(buckets.items()):
-        built = clusterer.build_hierarchy(group, root_category, threshold=threshold)
-        built["category"] = root_category
-        hierarchy[root_category] = built
+    for root_category, groups in sorted(buckets.items()):
+        if len(groups) == 1 and root_category in groups:
+            built = clusterer.build_hierarchy(groups[root_category], root_category, threshold=threshold)
+            built["category"] = root_category
+            hierarchy[root_category] = clusterer.optimize_hierarchy_payload(root_category, built, is_root=True)
+            continue
+
+        root_bookmarks = list(groups.get(root_category, []))
+        subcategories: dict[str, dict] = {}
+        for category_name, group in sorted(groups.items()):
+            if category_name == root_category:
+                continue
+            display_name = clusterer._category_leaf_label(category_name, root_category) or root_category
+            built = clusterer.build_hierarchy(group, category_name, threshold=threshold)
+            built["name"] = display_name
+            built["category"] = category_name
+            clusterer._merge_named_subcategory(subcategories, display_name, built)
+
+        payload = {
+            "name": root_category,
+            "category": root_category,
+            "subcategories": subcategories,
+            "bookmarks": root_bookmarks,
+            "count": len(root_bookmarks) + sum(item.get("count", 0) for item in subcategories.values()),
+            "cluster_reason": "按一级分类组织，再在叶子分类内聚类",
+            "representative_tokens": clusterer._representative_tokens([bookmark for group in groups.values() for bookmark in group]),
+            "source_folder_reused": False,
+            "source_folder_quality_score": 0.0,
+            "merge_from_categories": sorted(groups.keys()),
+            "preserve_children": True,
+        }
+        hierarchy[root_category] = clusterer.optimize_hierarchy_payload(root_category, payload, is_root=True)
     return hierarchy
+
+
+def _collect_payload_bookmarks(payload: dict) -> list[dict]:
+    bookmarks = list(payload.get("bookmarks") or [])
+    for child in (payload.get("subcategories") or {}).values():
+        bookmarks.extend(_collect_payload_bookmarks(child))
+    return bookmarks
+
+
+def limit_payload_depth(payload: dict, max_depth: int, *, depth: int = 1) -> dict:
+    limited = copy.deepcopy(payload)
+    limited["bookmarks"] = list(limited.get("bookmarks") or [])
+    limited["subcategories"] = dict(limited.get("subcategories") or {})
+    if max_depth <= 0:
+        return limited
+    if depth >= max_depth:
+        limited["bookmarks"].extend(
+            bookmark
+            for child in limited["subcategories"].values()
+            for bookmark in _collect_payload_bookmarks(child)
+        )
+        limited["subcategories"] = {}
+        limited["count"] = len(limited["bookmarks"])
+        return limited
+
+    limited["subcategories"] = {
+        name: limit_payload_depth(child, max_depth, depth=depth + 1)
+        for name, child in limited["subcategories"].items()
+    }
+    limited["count"] = len(limited["bookmarks"]) + sum(child.get("count", 0) for child in limited["subcategories"].values())
+    return limited
+
+
+def build_display_hierarchy(
+    clusterer: BookmarkClusterer,
+    root_hierarchy: dict[str, dict],
+    root_groups: List[dict],
+    display_options: dict,
+) -> dict[str, dict]:
+    fallback_group_name = display_options.get("fallback_group_name", "实验与杂项")
+    collapse_single_child = bool(display_options.get("collapse_single_child", True))
+    max_depth = int(display_options.get("max_depth", 3))
+
+    specs = [
+        {
+            "name": item.get("name") or "未命名分组",
+            "roots": list(dict.fromkeys(item.get("roots") or [])),
+        }
+        for item in root_groups
+    ]
+    assigned_roots = {root for spec in specs for root in spec["roots"]}
+    remaining_roots = [root for root in root_hierarchy if root not in assigned_roots]
+    if remaining_roots:
+        fallback_spec = next((spec for spec in specs if spec["name"] == fallback_group_name), None)
+        if fallback_spec is None:
+            specs.append({"name": fallback_group_name, "roots": remaining_roots})
+        else:
+            fallback_spec["roots"] = list(dict.fromkeys(fallback_spec["roots"] + remaining_roots))
+
+    display_hierarchy: dict[str, dict] = {}
+    for order, spec in enumerate(specs):
+        group_name = spec["name"]
+        roots = [root for root in spec["roots"] if root in root_hierarchy]
+        if not roots:
+            continue
+
+        if collapse_single_child and len(roots) == 1:
+            payload = copy.deepcopy(root_hierarchy[roots[0]])
+            payload["name"] = group_name
+            payload["category"] = group_name
+            payload["display_order"] = order
+        else:
+            subcategories = {}
+            for child_order, root_name in enumerate(roots):
+                child_payload = copy.deepcopy(root_hierarchy[root_name])
+                child_payload["name"] = root_name
+                child_payload["category"] = root_name
+                child_payload["display_order"] = child_order
+                subcategories[root_name] = child_payload
+            payload = {
+                "name": group_name,
+                "category": group_name,
+                "subcategories": subcategories,
+                "bookmarks": [],
+                "count": sum(item.get("count", 0) for item in subcategories.values()),
+                "cluster_reason": "按展示分组组合一级目录",
+                "representative_tokens": [],
+                "source_folder_reused": False,
+                "source_folder_quality_score": 0.0,
+                "merge_from_categories": roots,
+                "display_order": order,
+                "preserve_children": True,
+            }
+
+        optimized = clusterer.optimize_hierarchy_payload(group_name, payload, is_root=True)
+        optimized["display_order"] = order
+        display_hierarchy[group_name] = limit_payload_depth(optimized, max_depth)
+
+    return display_hierarchy
 
 
 def main() -> int:
@@ -693,10 +1113,16 @@ def main() -> int:
         domain_split_min_size=options.get("domain_split_min_size", 5),
     )
 
-    hierarchy = build_root_hierarchy(
+    raw_hierarchy = build_root_hierarchy(
         clusterer,
         bookmarks,
         threshold=options.get("max_bookmarks_without_clustering", 20),
+    )
+    hierarchy = build_display_hierarchy(
+        clusterer,
+        raw_hierarchy,
+        options.get("root_groups", []),
+        options.get("display", {}),
     )
 
     review_groups: dict[str, list[dict]] = defaultdict(list)

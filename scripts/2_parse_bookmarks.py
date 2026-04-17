@@ -2,7 +2,6 @@
 """步骤2: 解析 Chrome 书签 HTML 文件。"""
 from __future__ import annotations
 
-import hashlib
 import json
 from collections import defaultdict
 from pathlib import Path
@@ -10,7 +9,14 @@ from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 
-from common import build_parser, configure_logging, ensure_parent, load_config_from_args
+from common import (
+    build_parser,
+    configure_logging,
+    ensure_parent,
+    load_config_from_args,
+    normalize_bookmark_url,
+    normalize_fetch_url,
+)
 
 
 IGNORED_FOLDERS = {"书签栏", "Bookmarks Bar", "Bookmarks bar", "其他书签", "Other Bookmarks"}
@@ -25,9 +31,6 @@ def parse_bookmarks(html_file: Path) -> dict:
     bookmark_id = 0
     all_folders = set()
     duplicates = []
-
-    def get_url_hash(url: str) -> str:
-        return hashlib.md5(url.encode("utf-8")).hexdigest()
 
     def get_folder_path(a_tag) -> list[str]:
         path = []
@@ -48,14 +51,15 @@ def parse_bookmarks(html_file: Path) -> dict:
         if not url or url.startswith("javascript:"):
             continue
 
-        url_hash = get_url_hash(url)
-        if url_hash in seen_urls:
+        bookmark_url_key = normalize_bookmark_url(url)
+        fetch_url_key = normalize_fetch_url(url)
+        if bookmark_url_key in seen_urls:
             duplicates.append({"url": url, "name": a.get_text(strip=True)})
             continue
-        seen_urls.add(url_hash)
+        seen_urls.add(bookmark_url_key)
 
         try:
-            domain = urlparse(url).netloc
+            domain = urlparse(fetch_url_key or url).netloc
         except ValueError:
             domain = ""
 
@@ -65,6 +69,7 @@ def parse_bookmarks(html_file: Path) -> dict:
                 "name": a.get_text(strip=True),
                 "url": url,
                 "domain": domain,
+                "fetch_normalized_url": fetch_url_key,
                 "original_folder_path": get_folder_path(a),
                 "add_date": a.get("add_date", ""),
                 "icon": a.get("icon", ""),

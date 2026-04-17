@@ -42,6 +42,18 @@ python3 scripts/6_generate_html.py --config skill_config.json
 python3 scripts/3_fetch_webpage_info.py --config skill_config.json --force-refetch
 ```
 
+## 清理抓取缓存后重抓
+
+```bash
+./organize.sh data/bookmarks.html skill_config.json --clear-fetch-cache
+```
+
+## 删除全部中间产物并重建
+
+```bash
+./organize.sh data/bookmarks.html skill_config.json --reset-all
+```
+
 ## 关键输出
 
 - 输出 HTML：`output/organized_bookmarks.html`
@@ -55,6 +67,8 @@ python3 scripts/3_fetch_webpage_info.py --config skill_config.json --force-refet
 
 - 抓取步骤默认不会自动启用代理，需显式传 `--use-proxy` 或在配置中开启。
 - 重新执行时，已成功抓取的书签会优先复用缓存，只重试失败项。
+- `知乎 / CSDN / GitHub / GitBook` 等受信任站点的常见反爬响应默认不进入 `待审阅`。
+- 导出结果会先按展示分组组织顶层目录，再保留更细的叶子分类。
 - 异常链接会保留在原分类中，并镜像到顶层 `待审阅` 目录，因此导出 HTML 中的总书签数可能大于原始书签数。
 
 ## 最小目录示意

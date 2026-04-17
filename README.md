@@ -12,8 +12,10 @@ v1.2.0 在上一版基础上新增了几个实用能力：
 
 - 抓取步骤支持显式代理，可选择读取 `https_proxy/http_proxy/all_proxy`。
 - 抓取缓存支持**增量复用**，重新执行时默认只重试非成功项，不重复抓取已成功书签。
+- 对 `知乎 / CSDN / GitHub / GitBook` 等高频反爬站点加入受信任访问策略，`403/406/429` 及部分抓取异常不再默认进入 `待审阅`。
 - 新增统一的待审阅异常报告，并在导出书签中增加顶层 `待审阅` 目录。
-- 修复聚类阶段的大量伪重复目录问题，减少 `分类名 (2)`、`分类名 (34)` 这类无意义后缀。
+- 导出层级增加展示分组，优先保留叶子分类并压平过深目录，减少书签栏最外层文件夹数量。
+- 支持清理抓取缓存或删除全部中间产物后重新开始。
 
 ## 使用入口
 
@@ -45,6 +47,18 @@ export http_proxy=http://127.0.0.1:7897
 export all_proxy=socks5://127.0.0.1:7897
 
 ./organize.sh data/bookmarks.html skill_config.json --use-proxy --trust-env
+```
+
+如果要删除抓取缓存后重新抓取：
+
+```bash
+./organize.sh data/bookmarks.html skill_config.json --clear-fetch-cache
+```
+
+如果要删除全部中间产物和输出，再从头构建：
+
+```bash
+./organize.sh data/bookmarks.html skill_config.json --reset-all
 ```
 
 ### 默认输出
@@ -90,9 +104,10 @@ python3 scripts/3_fetch_webpage_info.py --config skill_config.json --force-refet
 - 报告文件路径；
 - 抓取并发、超时、重试、延迟；
 - 代理开关与代理地址；
+- 受信任站点待审阅策略；
 - 是否强制全量重抓；
 - 分类权重与确认阈值；
-- 聚类阈值；
+- 聚类阈值、顶层展示分组与目录深度；
 - 日志级别与日志文件路径。
 
 > 注意：当你传入一个外部配置文件时，配置里的相对路径会相对于**该配置文件所在目录**解释。
@@ -109,6 +124,10 @@ python3 scripts/3_fetch_webpage_info.py --config skill_config.json --force-refet
 - `force_refetch`
 - `cache_file`
 - `user_agent`
+- `review_policy.trusted_access.enabled`
+- `review_policy.trusted_access.domain_suffixes`
+- `review_policy.trusted_access.http_statuses`
+- `review_policy.trusted_access.allow_reason_codes`
 - `proxy.enabled`
 - `proxy.trust_env`
 - `proxy.http_proxy`
@@ -171,10 +190,9 @@ python3 scripts/3_fetch_webpage_info.py --config skill_config.json --force-refet
 │   └── TiDB
 │       └── TiDB 架构
 ├── 技术博客
-│   └── 某篇知乎文章
+│   └── 知乎
+│       └── 某篇知乎文章
 └── 待审阅
-    ├── HTTP 4xx/5xx
-    │   └── 某篇知乎文章
     └── DNS/连接失败
         └── 旧博客链接
 ```
@@ -182,7 +200,7 @@ python3 scripts/3_fetch_webpage_info.py --config skill_config.json --force-refet
 ### 说明
 
 - `PostgreSQL Docs` 和 `TiDB 架构` 会进入正常分类。
-- `某篇知乎文章` 如果抓取时返回 `403`，仍会保留在原分类中，同时镜像到 `待审阅/HTTP 4xx/5xx`。
+- `某篇知乎文章` 如果抓取时返回常见反爬响应（如 `403`），会保留在原分类中，默认不进入 `待审阅`。
 - `旧博客链接` 如果域名解析失败或站点已不可达，会进入 `待审阅` 对应异常目录。
 - 因为异常链接会在两个地方同时出现，所以导出的总书签数可能比原始书签数多。
 
@@ -206,6 +224,18 @@ python3 scripts/3_fetch_webpage_info.py --config skill_config.json --force-refet
 
 ```bash
 ./organize.sh data/bookmarks.html skill_config.json --force-refetch
+```
+
+### 4. 清理抓取缓存后重新开始
+
+```bash
+./organize.sh data/bookmarks.html skill_config.json --clear-fetch-cache
+```
+
+### 5. 删除全部中间产物和输出
+
+```bash
+./organize.sh data/bookmarks.html skill_config.json --reset-all
 ```
 
 ## 测试

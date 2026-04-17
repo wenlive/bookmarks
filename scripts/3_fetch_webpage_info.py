@@ -5,14 +5,15 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from collections import Counter
 from pathlib import Path
-from typing import Any, Dict
-from urllib.parse import parse_qsl, urljoin, urlparse, urlunparse
+from typing import Dict
+from urllib.parse import parse_qsl, urljoin, urlparse
 
 import aiohttp
 from bs4 import BeautifulSoup
 
-from common import build_parser, configure_logging, ensure_parent, load_config_from_args
+from common import build_parser, configure_logging, ensure_parent, load_config_from_args, normalize_fetch_url
 
 TEXT_PREVIEW_LIMIT = 500
 GENERIC_TITLE_TOKENS = {
@@ -38,6 +39,7 @@ REVIEW_LABELS = {
     "http_error": "HTTP 4xx/5xx",
     "invalid_url": "无效链接/非HTTP",
     "other_error": "其他抓取异常",
+    "trusted_access": "受信任站点/疑似反爬",
 }
 
 
@@ -117,24 +119,122 @@ def normalize_metadata(metadata: dict | None) -> dict:
     return metadata
 
 
-def should_retry_bookmark(existing: dict | None, force_refetch: bool) -> bool:
+def domain_matches_suffix(domain: str, suffix: str) -> bool:
+    normalized_domain = (domain or "").strip(".").lower()
+    normalized_suffix = (suffix or "").strip(".").lower()
+    return bool(normalized_domain and normalized_suffix and (normalized_domain == normalized_suffix or normalized_domain.endswith(f".{normalized_suffix}")))
+
+
+def matching_trusted_rule(domain: str, review_policy: dict | None) -> tuple[dict | None, str | None]:
+    trusted_access = (review_policy or {}).get("trusted_access", {})
+    if not trusted_access.get("enabled"):
+        return None, None
+
+    base_rule = {
+        "http_statuses": list(trusted_access.get("http_statuses", [])),
+        "allow_reason_codes": list(trusted_access.get("allow_reason_codes", [])),
+    }
+    for rule in trusted_access.get("domain_rules", []):
+        matched_domain = next(
+            (suffix for suffix in rule.get("domain_suffixes", []) if domain_matches_suffix(domain, suffix)),
+            None,
+        )
+        if matched_domain:
+            merged_rule = dict(base_rule)
+            merged_rule.update(rule)
+            return merged_rule, matched_domain
+
+    matched_domain = next(
+        (suffix for suffix in trusted_access.get("domain_suffixes", []) if domain_matches_suffix(domain, suffix)),
+        None,
+    )
+    if not matched_domain:
+        return None, None
+    return base_rule, matched_domain
+
+
+def trusted_access_match(domain: str, metadata: dict, review_policy: dict | None) -> str | None:
+    normalized = normalize_metadata(metadata)
+    link_health = normalized.get("link_health", {})
+    reason_code = link_health.get("reason_code")
+    status_code = link_health.get("status_code")
+    rule, matched_domain = matching_trusted_rule(domain, review_policy)
+    if not matched_domain:
+        return None
+
+    if reason_code == "http_error" and status_code in set(rule.get("http_statuses", [])):
+        return matched_domain
+    if reason_code in set(rule.get("allow_reason_codes", [])):
+        return matched_domain
+    return None
+
+
+def apply_review_policy(metadata: dict | None, domain: str, review_policy: dict | None = None) -> dict:
+    normalized = normalize_metadata(metadata)
+    link_health = dict(normalized.get("link_health", {}))
+    raw_reason_code = link_health.get("reason_code")
+    raw_reason_label = link_health.get("reason_label")
+    raw_review_required = bool(link_health.get("review_required"))
+
+    matched_domain = trusted_access_match(domain, normalized, review_policy)
+
+    link_health["raw_reason_code"] = raw_reason_code
+    link_health["raw_reason_label"] = raw_reason_label
+    link_health["raw_review_required"] = raw_review_required
+    link_health["trusted_override"] = False
+    link_health["trusted_domain"] = None
+
+    if matched_domain:
+        link_health["reason_code"] = "trusted_access"
+        link_health["reason_label"] = REVIEW_LABELS["trusted_access"]
+        link_health["review_required"] = False
+        link_health["trusted_override"] = True
+        link_health["trusted_domain"] = matched_domain
+
+    normalized["link_health"] = link_health
+    return normalized
+
+
+def should_retry_bookmark(existing: dict | None, force_refetch: bool, review_policy: dict | None = None) -> bool:
     if force_refetch or not existing:
         return True
-    metadata = normalize_metadata(existing.get("metadata", {}))
+    metadata = apply_review_policy(existing.get("metadata", {}), existing.get("domain", ""), review_policy)
+    if not metadata.get("link_health", {}).get("review_required", True):
+        return False
     return metadata.get("fetch_status") in RETRYABLE_FETCH_STATUSES
 
 
-def bookmark_cache_key(bookmark: dict) -> tuple[str, str]:
-    return str(bookmark.get("id", "")), str(bookmark.get("url", ""))
+def _metadata_priority(bookmark: dict, review_policy: dict | None = None) -> int:
+    metadata = apply_review_policy(bookmark.get("metadata", {}), bookmark.get("domain", ""), review_policy)
+    status = metadata.get("fetch_status")
+    if status == "success":
+        return 4
+    if not metadata.get("link_health", {}).get("review_required", True):
+        return 3
+    if status == "broken":
+        return 2
+    if status in {"timeout", "error", "skipped"}:
+        return 1
+    return 0
 
 
-def build_existing_index(bookmarks: list[dict]) -> dict[tuple[str, str], dict]:
-    return {bookmark_cache_key(bookmark): bookmark for bookmark in bookmarks}
+def bookmark_cache_key(bookmark: dict) -> str:
+    return str(bookmark.get("fetch_normalized_url") or normalize_fetch_url(bookmark.get("url", "")))
 
 
-def merge_with_metadata(bookmark: dict, metadata: dict) -> dict:
+def build_existing_index(bookmarks: list[dict], review_policy: dict | None = None) -> dict[str, dict]:
+    index: dict[str, dict] = {}
+    for bookmark in bookmarks:
+        key = bookmark_cache_key(bookmark)
+        existing = index.get(key)
+        if existing is None or _metadata_priority(bookmark, review_policy) >= _metadata_priority(existing, review_policy):
+            index[key] = bookmark
+    return index
+
+
+def merge_with_metadata(bookmark: dict, metadata: dict, review_policy: dict | None = None) -> dict:
     enriched = bookmark.copy()
-    enriched["metadata"] = normalize_metadata(metadata)
+    enriched["metadata"] = apply_review_policy(metadata, bookmark.get("domain", ""), review_policy)
     return enriched
 
 
@@ -150,8 +250,8 @@ def resolve_proxy_for_url(url: str, proxy_options: dict) -> str | None:
 
 
 def extract_url_signals(url: str) -> dict:
-    parsed = urlparse(url)
-    normalized_url = urlunparse((parsed.scheme.lower(), parsed.netloc.lower(), parsed.path or "/", "", parsed.query, ""))
+    normalized_url = normalize_fetch_url(url)
+    parsed = urlparse(normalized_url)
     subdomain, registrable = split_domain_parts(parsed.netloc)
     return {
         "normalized_url": normalized_url,
@@ -395,7 +495,14 @@ async def fetch_with_aiohttp(session: aiohttp.ClientSession, url: str, timeout: 
     })
 
 
-async def process_batch(bookmarks: list, session: aiohttp.ClientSession, timeout: int, max_retries: int, proxy_options: dict) -> list:
+async def process_batch(
+    bookmarks: list,
+    session: aiohttp.ClientSession,
+    timeout: int,
+    max_retries: int,
+    proxy_options: dict,
+    review_policy: dict | None = None,
+) -> list:
     tasks = []
     for bookmark in bookmarks:
         if bookmark["url"].startswith(("http://", "https://")):
@@ -408,16 +515,16 @@ async def process_batch(bookmarks: list, session: aiohttp.ClientSession, timeout
     for bookmark, metadata in zip(bookmarks, responses):
         if isinstance(metadata, Exception):
             metadata = {"fetch_status": "error", "error": str(metadata), "metadata_schema_version": "site_profile/v1"}
-        result.append(merge_with_metadata(bookmark, metadata))
+        result.append(merge_with_metadata(bookmark, metadata, review_policy))
     return result
 
 
 
-def export_broken_links_report(bookmarks: list, report_file: Path) -> int:
+def export_broken_links_report(bookmarks: list, report_file: Path, review_policy: dict | None = None) -> int:
     broken_links = []
     for bookmark in bookmarks:
-        metadata = bookmark.get("metadata", {})
-        if metadata.get("fetch_status") == "broken":
+        metadata = apply_review_policy(bookmark.get("metadata", {}), bookmark.get("domain", ""), review_policy)
+        if metadata.get("fetch_status") == "broken" and not metadata.get("link_health", {}).get("trusted_override"):
             broken_links.append(
                 {
                     "id": bookmark.get("id"),
@@ -433,10 +540,10 @@ def export_broken_links_report(bookmarks: list, report_file: Path) -> int:
     return len(broken_links)
 
 
-def export_review_report(bookmarks: list, report_file: Path) -> int:
+def export_review_report(bookmarks: list, report_file: Path, review_policy: dict | None = None) -> int:
     items = []
     for bookmark in bookmarks:
-        metadata = normalize_metadata(bookmark.get("metadata", {}))
+        metadata = apply_review_policy(bookmark.get("metadata", {}), bookmark.get("domain", ""), review_policy)
         link_health = metadata.get("link_health", {})
         if not link_health.get("review_required"):
             continue
@@ -462,29 +569,34 @@ async def fetch_webpage_info_async(input_file: Path, output_file: Path, options:
     data = json.loads(input_file.read_text(encoding="utf-8"))
     bookmarks = data["bookmarks"]
     total = len(bookmarks)
+    review_policy = options.get("review_policy", {})
 
-    headers = {"User-Agent": options["user_agent"]}
+    headers = {
+        "User-Agent": options["user_agent"],
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
     connector = aiohttp.TCPConnector(limit=options["concurrent_limit"])
-    existing_data: dict[str, Any] = {}
     existing_bookmarks = []
     if output_file.exists():
         try:
-            existing_data = json.loads(output_file.read_text(encoding="utf-8"))
-            existing_bookmarks = existing_data.get("bookmarks", [])
+            existing_bookmarks = json.loads(output_file.read_text(encoding="utf-8")).get("bookmarks", [])
         except json.JSONDecodeError:
             existing_bookmarks = []
-    existing_index = build_existing_index(existing_bookmarks)
-    results: list[dict] = []
-    pending: list[dict] = []
+    existing_index = build_existing_index(existing_bookmarks, review_policy)
+    ordered_results: list[dict | None] = [None] * total
+    pending: list[tuple[int, dict]] = []
     reused_count = 0
     explicit_proxy = any(options.get("proxy", {}).get(key) for key in ("http_proxy", "https_proxy", "all_proxy"))
 
-    for bookmark in bookmarks:
+    for index, bookmark in enumerate(bookmarks):
         existing = existing_index.get(bookmark_cache_key(bookmark))
-        if should_retry_bookmark(existing, options["force_refetch"]):
-            pending.append(bookmark)
+        if should_retry_bookmark(existing, options["force_refetch"], review_policy):
+            pending.append((index, bookmark))
         elif existing:
-            results.append(merge_with_metadata(bookmark, existing.get("metadata", {})))
+            ordered_results[index] = merge_with_metadata(bookmark, existing.get("metadata", {}), review_policy)
             reused_count += 1
 
     async with aiohttp.ClientSession(
@@ -493,44 +605,69 @@ async def fetch_webpage_info_async(input_file: Path, output_file: Path, options:
         trust_env=options["proxy"]["enabled"] and options["proxy"]["trust_env"] and not explicit_proxy,
     ) as session:
         for index in range(0, len(pending), options["batch_size"]):
-            batch = pending[index:index + options["batch_size"]]
+            batch_entries = pending[index:index + options["batch_size"]]
+            batch = [bookmark for _, bookmark in batch_entries]
             logger.info("抓取进度: %s/%s", reused_count + index, total)
-            batch_results = await process_batch(batch, session, options["timeout"], options["max_retries"], options["proxy"])
-            results.extend(batch_results)
+            batch_results = await process_batch(
+                batch,
+                session,
+                options["timeout"],
+                options["max_retries"],
+                options["proxy"],
+                review_policy,
+            )
+            for (bookmark_index, _), enriched in zip(batch_entries, batch_results):
+                ordered_results[bookmark_index] = enriched
             await asyncio.sleep(options["delay"])
 
-    result_index = {bookmark_cache_key(bookmark): bookmark for bookmark in results}
-    ordered_results = []
-    for bookmark in bookmarks:
-        candidate = result_index.get(bookmark_cache_key(bookmark))
+    final_results: list[dict] = []
+    for index, bookmark in enumerate(bookmarks):
+        candidate = ordered_results[index]
         if candidate is None:
-            candidate = merge_with_metadata(bookmark, {"fetch_status": "error", "error": "Missing fetch result", "metadata_schema_version": "site_profile/v1"})
-        ordered_results.append(candidate)
+            candidate = merge_with_metadata(
+                bookmark,
+                {"fetch_status": "error", "error": "Missing fetch result", "metadata_schema_version": "site_profile/v1"},
+                review_policy,
+            )
+        final_results.append(candidate)
 
     success_count = 0
     broken_count = 0
     failed_count = 0
-    for item in ordered_results:
-        status = normalize_metadata(item.get("metadata", {})).get("fetch_status")
+    review_free_count = 0
+    trusted_override_count = 0
+    trusted_override_domains: Counter[str] = Counter()
+    for item in final_results:
+        metadata = apply_review_policy(item.get("metadata", {}), item.get("domain", ""), review_policy)
+        status = metadata.get("fetch_status")
+        link_health = metadata.get("link_health", {})
         if status == "success":
             success_count += 1
         elif status == "broken":
             broken_count += 1
         else:
             failed_count += 1
+        if not link_health.get("review_required", True):
+            review_free_count += 1
+        if link_health.get("trusted_override"):
+            trusted_override_count += 1
+            trusted_override_domains[link_health.get("trusted_domain") or item.get("domain") or "未知域名"] += 1
 
     final_data = {
-        "bookmarks": ordered_results,
+        "bookmarks": final_results,
         "stats": {
             "total_bookmarks": total,
             "success_count": success_count,
             "broken_count": broken_count,
             "fail_count": failed_count,
+            "review_free_count": review_free_count,
             "success_rate": f"{(success_count * 100 / total) if total else 0:.1f}%",
             "reused_count": reused_count,
             "retried_count": len(pending),
             "proxy_enabled": options["proxy"]["enabled"],
             "proxy_trust_env": options["proxy"]["trust_env"],
+            "trusted_override_count": trusted_override_count,
+            "trusted_override_domains": dict(sorted(trusted_override_domains.items())),
             "metadata_schema_version": "site_profile/v1",
         },
     }
@@ -554,6 +691,7 @@ def main() -> int:
     parser.add_argument("--http-proxy", default=None, help="HTTP 代理地址")
     parser.add_argument("--https-proxy", default=None, help="HTTPS 代理地址")
     parser.add_argument("--all-proxy", default=None, help="通用代理地址")
+    parser.add_argument("--clear-cache", action="store_true", help="删除抓取缓存后重新开始")
     parser.add_argument("--force-refetch", action="store_true", help="忽略已有成功缓存并全量重抓")
     args = parser.parse_args()
 
@@ -568,6 +706,10 @@ def main() -> int:
         logger.error("输入文件不存在: %s", input_file)
         print(f"错误: 输入文件不存在: {input_file}")
         return 1
+
+    if args.clear_cache and output_file.exists():
+        output_file.unlink()
+        logger.info("已清理抓取缓存: %s", output_file)
 
     options = dict(config.fetch_options)
     if args.concurrency is not None:
@@ -598,12 +740,14 @@ def main() -> int:
     options["proxy"] = proxy_options
 
     result = asyncio.run(fetch_webpage_info_async(input_file, output_file, options, logger))
-    broken_links_count = export_broken_links_report(result["bookmarks"], broken_links_report_file)
-    review_count = export_review_report(result["bookmarks"], review_report_file)
+    broken_links_count = export_broken_links_report(result["bookmarks"], broken_links_report_file, options.get("review_policy"))
+    review_count = export_review_report(result["bookmarks"], review_report_file, options.get("review_policy"))
     print(f"✓ 网页信息获取完成: {output_file}")
     print(f"  成功: {result['stats']['success_count']}/{result['stats']['total_bookmarks']}")
     print(f"  复用缓存: {result['stats']['reused_count']}")
     print(f"  重试抓取: {result['stats']['retried_count']}")
+    print(f"  免审阅: {result['stats']['review_free_count']}")
+    print(f"  受信任站点放行: {result['stats']['trusted_override_count']}")
     print(f"  失效链接: {broken_links_count}")
     print(f"  失效链接报告: {broken_links_report_file}")
     print(f"  待审阅异常: {review_count}")
