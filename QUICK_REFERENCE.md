@@ -1,12 +1,17 @@
-# 快速参考指南
+---
+name: bookmark-organizer-quick-reference
+description: Fast command reference for operating and validating the Chrome bookmark organizer.
+---
 
-## 一键运行
+# Quick Reference
+
+## Canonical Run
 
 ```bash
 ./organize.sh data/bookmarks.html skill_config.json
 ```
 
-## 一键运行并启用代理
+## Run With Proxy
 
 ```bash
 export https_proxy=http://127.0.0.1:7897
@@ -16,7 +21,20 @@ export all_proxy=socks5://127.0.0.1:7897
 ./organize.sh data/bookmarks.html skill_config.json --use-proxy --trust-env
 ```
 
-## 分步运行
+## Reset Modes
+
+```bash
+# Retry from a clean fetch cache.
+./organize.sh data/bookmarks.html skill_config.json --clear-fetch-cache
+
+# Remove all generated pipeline state and rebuild.
+./organize.sh data/bookmarks.html skill_config.json --reset-all
+
+# Ignore successful fetch cache and refetch everything.
+./organize.sh data/bookmarks.html skill_config.json --force-refetch
+```
+
+## Step-by-step
 
 ```bash
 python3 scripts/1_copy_bookmark.py --config skill_config.json --source data/bookmarks.html
@@ -27,74 +45,86 @@ python3 scripts/5_cluster_bookmarks.py --config skill_config.json
 python3 scripts/6_generate_html.py --config skill_config.json
 ```
 
-## 只重试失败抓取项
+## Partial Reruns
 
 ```bash
-python3 scripts/3_fetch_webpage_info.py --config skill_config.json --use-proxy --trust-env
+# Rules changed.
 python3 scripts/4_classify_bookmarks.py --config skill_config.json
 python3 scripts/5_cluster_bookmarks.py --config skill_config.json
 python3 scripts/6_generate_html.py --config skill_config.json
+
+# Clustering/display changed.
+python3 scripts/5_cluster_bookmarks.py --config skill_config.json
+python3 scripts/6_generate_html.py --config skill_config.json
+
+# HTML rendering changed.
+python3 scripts/6_generate_html.py --config skill_config.json
 ```
 
-## 强制全量重抓
+## Key Files
+
+| Path | Meaning |
+| --- | --- |
+| `skill_config.json` | Operational config |
+| `data/category_rules.json` | Shared default rules |
+| `data/category_rules_overrides.json` | Personal/local rule extensions |
+| `data/bookmarks.html` | Copied Chrome export |
+| `data/bookmarks_with_info.json` | Fetch cache and enriched metadata |
+| `data/classified_bookmarks.json` | Classification result |
+| `data/clustering_result.json` | Clustered hierarchy payload |
+| `output/organized_bookmarks.html` | Chrome import output |
+
+## Reports
+
+```text
+output/reports/duplicates.json
+output/reports/broken_links.json
+output/reports/needs_confirmation.json
+output/reports/review_queue.json
+output/reports/rule_suggestions.json
+output/reports/quality_report.json
+```
+
+## Quality Check
 
 ```bash
-python3 scripts/3_fetch_webpage_info.py --config skill_config.json --force-refetch
+python3 -m py_compile scripts/common.py scripts/1_copy_bookmark.py scripts/2_parse_bookmarks.py scripts/3_fetch_webpage_info.py scripts/4_classify_bookmarks.py scripts/5_cluster_bookmarks.py scripts/6_generate_html.py scripts/reset_pipeline_state.py
+python3 -c "import json; [json.load(open(path)) for path in ['data/category_rules.json','data/category_rules_overrides.json','skill_config.json']]"
+pytest -q
+git diff --check
 ```
 
-## 清理抓取缓存后重抓
+## Quality Metrics To Watch
 
-```bash
-./organize.sh data/bookmarks.html skill_config.json --clear-fetch-cache
+In `output/reports/quality_report.json`:
+
+```text
+folder_only_classification_count == 0
+low_confidence_normal_category_count == 0
+generic_platform_domain_suggestion_count == 0
+largest_generic_platform_cluster_size is not unexpectedly large
 ```
 
-## 删除全部中间产物并重建
+## Agent Rules
 
-```bash
-./organize.sh data/bookmarks.html skill_config.json --reset-all
-```
+- Treat `README.md` as the design contract.
+- Treat `RUNBOOK.md` as the operational procedure.
+- Treat `AGENTS.md` as the agent implementation guide.
+- Do not trust old Chrome folders as topic evidence.
+- Do not classify by broad platform domain.
+- Preserve broken links; mirror them to `待审阅`.
+- Prefer precise overrides in `data/category_rules_overrides.json`.
+- Rerun only the downstream steps required by the change.
 
-## 关键输出
-
-- 输出 HTML：`output/organized_bookmarks.html`
-- 重复 URL 报告：`output/reports/duplicates.json`
-- 失效链接报告：`output/reports/broken_links.json`
-- 待确认报告：`output/reports/needs_confirmation.json`
-- 待审阅异常报告：`output/reports/review_queue.json`
-- 规则建议报告：`output/reports/rule_suggestions.json`
-- 质量报告：`output/reports/quality_report.json`
-- 日志：`logs/bookmarks_organizer.log`
-
-## 注意
-
-- 抓取步骤默认不会自动启用代理，需显式传 `--use-proxy` 或在配置中开启。
-- 重新执行时，已成功抓取的书签会优先复用缓存，只重试失败项。
-- `知乎 / CSDN / GitHub / GitBook` 等受信任站点的常见反爬响应默认不进入 `待审阅`。
-- 导出结果会先按 `技术主题 / 工具与平台 / 学习与资料 / 个人与生活 / 待整理 / 发现主题` 等展示分组组织顶层目录。
-- 旧 Chrome 文件夹路径不会再作为主题分类强证据；低置信内容会集中到 `待整理` 或 `发现主题`。
-- 分类/聚类会优先使用结构化 `signal_pack`：用户保存标题、备注、OG/Twitter 元信息、schema 类型、主正文、语言、canonical URL 和收藏时间桶。
-- `GitHub / CSDN / 知乎 / StackOverflow` 等通用平台只作为来源信号，平台导航词不会再直接把不相关主题合成大簇。
-- 异常链接会保留在原分类中，并镜像到顶层 `待审阅` 目录，因此导出 HTML 中的总书签数可能大于原始书签数。
-
-## 最小目录示意
+## Output Shape
 
 ```text
 书签栏
 ├── 技术主题
-│   └── 数据库
-│       ├── PostgreSQL
-│       └── TiDB
+├── 工具与平台
+├── 学习与资料
+├── 个人与生活
 ├── 待整理
 ├── 发现主题
 └── 待审阅
-    ├── HTTP 4xx/5xx
-    ├── DNS/连接失败
-    └── 证书异常
-```
-
-## 快速检查
-
-```bash
-python3 -m compileall scripts tests
-pytest
 ```

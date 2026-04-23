@@ -1,49 +1,39 @@
-# Chrome书签智能整理工具
+---
+name: chrome-bookmark-organizer
+description: Use this project to turn exported Chrome bookmarks into classified, clustered, reviewable, Chrome-importable HTML. Read this first when operating, debugging, or extending the pipeline.
+---
 
-![Python](https://img.shields.io/badge/Python-3.8%2B-blue)
-![License](https://img.shields.io/badge/License-MIT-green)
-![Version](https://img.shields.io/badge/Version-1.2.0-orange)
+# Chrome Bookmark Organizer
 
-> 基于 Python 的 Chrome 书签整理流水线，支持配置驱动、代理抓取、增量重试、异常链接待审阅归档与 Chrome 可导入 HTML 导出。
+## Purpose
 
-## 当前版本重点
+This repository is a local, configuration-driven pipeline for reorganizing exported Chrome bookmarks.
 
-v1.2.0 在上一版基础上新增了几个实用能力：
+It is optimized for practical output quality rather than perfect taxonomy. The pipeline keeps uncertain items visible, avoids over-trusting stale Chrome folders, separates generic publishing platforms from real topics, and emits reports that help future rule improvements.
 
-- 抓取步骤支持显式代理，可选择读取 `https_proxy/http_proxy/all_proxy`。
-- 抓取缓存支持**增量复用**，重新执行时默认只重试非成功项，不重复抓取已成功书签。
-- 对 `知乎 / CSDN / GitHub / GitBook` 等高频反爬站点加入受信任访问策略，`403/406/429` 及部分抓取异常不再默认进入 `待审阅`。
-- 新增统一的待审阅异常报告，并在导出书签中增加顶层 `待审阅` 目录。
-- 分类不再把旧 Chrome 文件夹路径当作强证据，低置信内容进入 `待整理` 或 `发现主题`，减少历史文件夹造成的误分。
-- 分类和聚类共享结构化 `signal_pack`，会优先利用用户保存标题、用户备注、OpenGraph/Twitter 标题描述、schema 类型、主正文、语言、canonical URL 和收藏时间桶。
-- 对 `GitHub / CSDN / 知乎 / StackOverflow` 等通用平台，域名和平台导航词只作为来源信号，不再直接把不同主题内容拉成一个大簇。
-- 导出层级增加展示分组，默认使用 `技术主题 / 工具与平台 / 学习与资料 / 个人与生活 / 待整理 / 发现主题` 等顶层目录。
-- 新增规则建议和质量报告，用于持续改进通用规则与个人覆盖规则。
-- 支持清理抓取缓存或删除全部中间产物后重新开始。
+## Use This When
 
-## 使用入口
+- You have a Chrome-exported `bookmarks.html` file and want a cleaner importable HTML file.
+- You want technical bookmarks grouped by topic, resource type, and discovered themes.
+- You need failed or suspicious links preserved but mirrored into a review queue.
+- You want reports that identify weak rules, mixed clusters, and topics worth adding.
+- You are an agent improving this project and need the current mental model, entrypoints, and quality gates.
 
-- 总览说明：`README.md`
-- 快速命令：`QUICK_REFERENCE.md`
-- 日常操作手册：`RUNBOOK.md`
+## Do Not Assume
 
-## 快速开始
+- Do not assume the original Chrome folder path is correct. It is context only, not strong topic evidence.
+- Do not add broad platform domains such as `github.com`, `csdn.net`, `zhihu.com`, or `medium.com` to topic rules. These are generic platforms.
+- Do not delete broken links automatically. The pipeline preserves them and mirrors them into `待审阅`.
+- Do not treat a higher count in generated HTML as duplication by itself. Review links are intentionally mirrored.
+- Do not edit generated files in `data/*.json`, `output/`, or `logs/` as source of truth.
 
-### 安装依赖
-
-```bash
-python3 -m pip install -r requirements.txt
-```
-
-如果本机某个 Python/conda 环境存在 SSL 或联网问题，建议切换到能正常访问 HTTPS 的 Python 环境后再运行。
-
-### 一键运行
+## Primary Command
 
 ```bash
 ./organize.sh data/bookmarks.html skill_config.json
 ```
 
-如果需要显式启用代理并从环境变量读取代理地址：
+If the network needs a proxy:
 
 ```bash
 export https_proxy=http://127.0.0.1:7897
@@ -53,203 +43,198 @@ export all_proxy=socks5://127.0.0.1:7897
 ./organize.sh data/bookmarks.html skill_config.json --use-proxy --trust-env
 ```
 
-如果要删除抓取缓存后重新抓取：
-
-```bash
-./organize.sh data/bookmarks.html skill_config.json --clear-fetch-cache
-```
-
-如果要删除全部中间产物和输出，再从头构建：
-
-```bash
-./organize.sh data/bookmarks.html skill_config.json --reset-all
-```
-
-### 默认输出
-
-- 整理后的 HTML：`output/organized_bookmarks.html`
-- 重复 URL 报告：`output/reports/duplicates.json`
-- 失效链接报告：`output/reports/broken_links.json`
-- 待确认报告：`output/reports/needs_confirmation.json`
-- 待审阅异常报告：`output/reports/review_queue.json`
-- 规则建议报告：`output/reports/rule_suggestions.json`
-- 质量报告：`output/reports/quality_report.json`
-- 日志文件：`logs/bookmarks_organizer.log`
-
-## 分步运行
-
-```bash
-python3 scripts/1_copy_bookmark.py --config skill_config.json --source data/bookmarks.html
-python3 scripts/2_parse_bookmarks.py --config skill_config.json
-python3 scripts/3_fetch_webpage_info.py --config skill_config.json
-python3 scripts/4_classify_bookmarks.py --config skill_config.json
-python3 scripts/5_cluster_bookmarks.py --config skill_config.json
-python3 scripts/6_generate_html.py --config skill_config.json
-```
-
-如果只想重试抓取失败项并使用代理：
-
-```bash
-python3 scripts/3_fetch_webpage_info.py --config skill_config.json --use-proxy --trust-env
-python3 scripts/4_classify_bookmarks.py --config skill_config.json
-python3 scripts/5_cluster_bookmarks.py --config skill_config.json
-python3 scripts/6_generate_html.py --config skill_config.json
-```
-
-如果要忽略已有成功缓存、重新全量抓取：
-
-```bash
-python3 scripts/3_fetch_webpage_info.py --config skill_config.json --force-refetch
-```
-
-## 配置说明
-
-核心配置都在 `skill_config.json`，并且支持：
-
-- 输入/输出路径；
-- 报告文件路径；
-- 抓取并发、超时、重试、延迟；
-- 代理开关与代理地址；
-- 受信任站点待审阅策略；
-- 是否强制全量重抓；
-- 分类权重、自动归类置信度与确认阈值；
-- 聚类阈值、通用平台域名、顶层展示分组与目录深度；
-- 默认规则和可选个人覆盖规则；
-- 日志级别与日志文件路径。
-
-> 注意：当你传入一个外部配置文件时，配置里的相对路径会相对于**该配置文件所在目录**解释。
-
-### 抓取相关配置
-
-`fetch_options` 里当前支持：
-
-- `concurrent_limit`
-- `timeout`
-- `delay`
-- `batch_size`
-- `max_retries`
-- `force_refetch`
-- `cache_file`
-- `user_agent`
-- `review_policy.trusted_access.enabled`
-- `review_policy.trusted_access.domain_suffixes`
-- `review_policy.trusted_access.http_statuses`
-- `review_policy.trusted_access.allow_reason_codes`
-- `proxy.enabled`
-- `proxy.trust_env`
-- `proxy.http_proxy`
-- `proxy.https_proxy`
-- `proxy.all_proxy`
-
-### 代理行为
-
-- 默认不会自动启用代理。
-- 只有配置文件显式开启，或命令行传入 `--use-proxy` 时，抓取步骤才会走代理逻辑。
-- 传入 `--trust-env` 后，`aiohttp` 会读取当前 shell 中的 `https_proxy/http_proxy/all_proxy`。
-
-## 当前能力
-
-### 已完成
-
-- 去除硬编码绝对路径。
-- `organize.sh` 支持输入文件、配置文件以及抓取步骤透传参数。
-- 所有步骤接通配置文件与 CLI 参数。
-- 新增基础测试。
-- 精简依赖。
-- 日志输出接入。
-- 分类 scoring 与关键词聚类优化。
-- 导出重复 URL / 失效链接 / 待确认 / 待审阅 / 规则建议 / 质量评估报告。
-- 抓取缓存增量复用与失败重试。
-- 导出书签时保留原分类，同时把异常链接镜像到 `待审阅` 目录。
-- 修复聚类伪重复目录问题。
-- 移除旧 Chrome 文件夹路径对主题分类的强影响，改为基于页面内容、域名、标题、URL 和站点画像判定主题。
-- 增加结构化信息流：抓取层的 `og:*`、`twitter:*`、`schema_types`、`main_text_preview`、`lang`、`canonical_url`、`add_date` 会进入分类和聚类特征。
-
-## 导出结果说明
-
-- 最终 HTML 可以直接导入 Chrome。
-- 异常链接不会被自动删除。
-- 异常链接会同时出现在：
-  - 原来的整理分类中
-  - 顶层 `待审阅` 目录中
-- 因此最终 HTML 中的书签数量可能**大于原始书签数量**，这是预期行为，不是重复导出 bug。
-
-## 最小示例
-
-下面用一个最小示例说明输入和输出的大致形态。
-
-### 输入示意
-
-假设你从 Chrome 导出的书签里有这 4 条：
-
-- `PostgreSQL Docs` -> `https://www.postgresql.org/docs/`
-- `TiDB 架构` -> `https://docs.pingcap.com/zh/tidb/stable/tidb-architecture`
-- `某篇知乎文章` -> `https://zhuanlan.zhihu.com/p/123456`
-- `旧博客链接` -> `https://old.example.com/post/1`
-
-### 输出目录结构示意
-
-项目整理后，导出的 HTML 在 Chrome 中大致会表现为：
+The final importable file is:
 
 ```text
-书签栏
-├── 数据库
-│   ├── PostgreSQL
-│   │   └── PostgreSQL Docs
-│   └── TiDB
-│       └── TiDB 架构
-├── 技术博客
-│   └── 知乎
-│       └── 某篇知乎文章
-└── 待审阅
-    └── DNS/连接失败
-        └── 旧博客链接
+output/organized_bookmarks.html
 ```
 
-### 说明
+## Pipeline Contract
 
-- `PostgreSQL Docs` 和 `TiDB 架构` 会进入正常分类。
-- `某篇知乎文章` 如果抓取时返回常见反爬响应（如 `403`），会保留在原分类中，默认不进入 `待审阅`。
-- `旧博客链接` 如果域名解析失败或站点已不可达，会进入 `待审阅` 对应异常目录。
-- 因为异常链接会在两个地方同时出现，所以导出的总书签数可能比原始书签数多。
+The pipeline is linear:
 
-## 常见用法
+```text
+Chrome export HTML
+  -> scripts/1_copy_bookmark.py
+  -> scripts/2_parse_bookmarks.py
+  -> scripts/3_fetch_webpage_info.py
+  -> scripts/4_classify_bookmarks.py
+  -> scripts/5_cluster_bookmarks.py
+  -> scripts/6_generate_html.py
+  -> Chrome-importable HTML
+```
 
-### 1. 初次全量整理
+Each step reads configuration from `skill_config.json` unless overridden with CLI flags.
+
+## Step Map
+
+| Step | Script | Main input | Main output | Role |
+| --- | --- | --- | --- | --- |
+| 1 | `scripts/1_copy_bookmark.py` | source HTML | `data/bookmarks.html` | Copy source into project path |
+| 2 | `scripts/2_parse_bookmarks.py` | copied HTML | `data/parsed_bookmarks.json` | Parse Chrome bookmark HTML and duplicates |
+| 3 | `scripts/3_fetch_webpage_info.py` | parsed JSON | `data/bookmarks_with_info.json` | Fetch metadata, page signals, review health |
+| 4 | `scripts/4_classify_bookmarks.py` | enriched JSON | `data/classified_bookmarks.json` | Build `signal_pack`, score topic/rules/facets |
+| 5 | `scripts/5_cluster_bookmarks.py` | classified JSON | `data/clustering_result.json` | Soft cluster, build hierarchy, quality reports |
+| 6 | `scripts/6_generate_html.py` | clustering JSON | `output/organized_bookmarks.html` | Emit Chrome import HTML |
+
+## Data Model
+
+The current design centers on `signal_pack`, built in `scripts/common.py`.
+
+Important signals:
+
+- `preferred_title`: saved bookmark title first, then page metadata.
+- `title_candidates`: saved title, OG/Twitter title, `h1`, HTML title.
+- `preferred_description`: user description/notes, OG/Twitter description, meta description, main text.
+- `semantic_text`: consolidated text for classification and clustering.
+- `resource_facets`: structured hints such as `文档`, `博客`, `论文`, `仓库`, `工具`.
+- `source_facets`: site name, registrable domain, brand terms.
+- `quality_facets`: fetch success, review requirement, trusted-access state.
+- `canonical_identity`: canonical URL or normalized fetch URL.
+- `time_bucket`: year/month/week derived from Chrome `ADD_DATE`.
+
+## Classification Intent
+
+The classifier should prefer reliable evidence:
+
+- Strong: exact/suffix domain rules, title patterns, meaningful keyword/content hits.
+- Medium: metadata, OpenGraph/Twitter fields, schema/page type, main text.
+- Weak: dynamic topic candidates and generic discovered tokens.
+- Disabled for topic scoring: stale Chrome folder names.
+
+Low-confidence items should go to `待整理`, not a normal topic. Useful emerging themes should surface under `发现主题`.
+
+## Clustering Intent
+
+The clusterer builds soft topic groups without letting source platforms dominate.
+
+Key constraints:
+
+- Generic platforms are source signals, not topic roots.
+- `GitHub`, `CSDN`, `Zhihu`, `StackOverflow`, `Medium`, `docs.qq.com`, and similar domains must not merge unrelated content by domain alone.
+- `rule_roots` can guide destination only when enough normal-category support and confidence exist.
+- Mixed or weak clusters should land in `发现主题` or `待整理`, where reports can guide future rules.
+
+## Outputs
+
+Main output:
+
+- `output/organized_bookmarks.html`
+
+Reports:
+
+- `output/reports/duplicates.json`
+- `output/reports/broken_links.json`
+- `output/reports/needs_confirmation.json`
+- `output/reports/review_queue.json`
+- `output/reports/rule_suggestions.json`
+- `output/reports/quality_report.json`
+
+Logs:
+
+- `logs/bookmarks_organizer.log`
+
+## Output Semantics
+
+The final HTML is directly importable into Chrome.
+
+Broken or suspicious links are not removed. They remain in the normal hierarchy and are also mirrored into top-level `待审阅`. Therefore the generated HTML bookmark count may be greater than the original input count.
+
+Default top-level display groups:
+
+```text
+技术主题
+工具与平台
+学习与资料
+个人与生活
+待整理
+发现主题
+待审阅
+```
+
+## Configuration
+
+Use `skill_config.json` as the operational config.
+
+Core sections:
+
+- `input`: source bookmark path and rule files.
+- `pipeline`: intermediate file paths.
+- `output`: final HTML and report paths.
+- `fetch_options`: concurrency, timeout, retry, cache, proxy, trusted-access policy.
+- `classification_options`: scoring weights and confidence thresholds.
+- `clustering_options`: cluster thresholds, generic platforms, display groups.
+- `logging`: log level and log file.
+
+When using an alternate config file, relative paths are resolved relative to that config file's directory.
+
+## Rule Files
+
+- `data/category_rules.json`: default shared rules.
+- `data/category_rules_overrides.json`: personal or local extensions.
+
+Rule improvement guidance:
+
+- Add specific product/project domains only when the domain is topic-specific.
+- Add aliases/keywords when a stable theme appears in `rule_suggestions.json`.
+- Add personal overrides in `data/category_rules_overrides.json` instead of rewriting broad defaults when possible.
+- Keep generic platform domains in `generic_platform_domains`, not in topic rules.
+
+## Run Modes
+
+Normal run:
 
 ```bash
 ./organize.sh data/bookmarks.html skill_config.json
 ```
 
-### 2. 忘记开代理后补跑
+Retry failed fetches with proxy:
 
 ```bash
 ./organize.sh data/bookmarks.html skill_config.json --use-proxy --trust-env
 ```
 
-此时步骤 3 会复用已有成功抓取结果，只重试失败项，不需要清空历史缓存。
-
-### 3. 强制重新抓取全部网页
+Force full refetch:
 
 ```bash
 ./organize.sh data/bookmarks.html skill_config.json --force-refetch
 ```
 
-### 4. 清理抓取缓存后重新开始
+Clear only fetch cache:
 
 ```bash
 ./organize.sh data/bookmarks.html skill_config.json --clear-fetch-cache
 ```
 
-### 5. 删除全部中间产物和输出
+Remove all generated pipeline state and rebuild:
 
 ```bash
 ./organize.sh data/bookmarks.html skill_config.json --reset-all
 ```
 
-## 测试
+## Quality Gates
+
+Before committing code or rule changes:
 
 ```bash
-pytest
-python3 -m compileall scripts tests
+python3 -m py_compile scripts/common.py scripts/1_copy_bookmark.py scripts/2_parse_bookmarks.py scripts/3_fetch_webpage_info.py scripts/4_classify_bookmarks.py scripts/5_cluster_bookmarks.py scripts/6_generate_html.py scripts/reset_pipeline_state.py
+python3 -c "import json; [json.load(open(path)) for path in ['data/category_rules.json','data/category_rules_overrides.json','skill_config.json']]"
+pytest -q
+git diff --check
 ```
+
+After a real run, inspect `output/reports/quality_report.json`.
+
+Important metrics:
+
+- `folder_only_classification_count` should stay `0`.
+- `low_confidence_normal_category_count` should stay `0`.
+- `generic_platform_domain_suggestion_count` should stay `0`.
+- `largest_generic_platform_cluster_size` should not grow unexpectedly.
+
+## Document Map
+
+- `README.md`: canonical project skill and design contract.
+- `AGENTS.md`: operational guide for coding agents.
+- `RUNBOOK.md`: concrete daily operating procedures.
+- `QUICK_REFERENCE.md`: command card for frequent actions.
