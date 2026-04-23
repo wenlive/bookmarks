@@ -46,6 +46,8 @@ export all_proxy=socks5://127.0.0.1:7897
 - `output/reports/broken_links.json`
 - `output/reports/needs_confirmation.json`
 - `output/reports/review_queue.json`
+- `output/reports/rule_suggestions.json`
+- `output/reports/quality_report.json`
 
 ### 2. 忘记开代理后补跑
 
@@ -142,6 +144,22 @@ python3 scripts/3_fetch_webpage_info.py --config skill_config.json --force-refet
 
 默认情况下，`知乎 / CSDN / GitHub / GitBook` 等高频站点的常见反爬响应不会进入这里。
 
+### `rule_suggestions.json`
+
+这是规则改进建议报告。它会把未被现有规则稳定覆盖、但已经在聚类中形成主题的内容列出来，例如建议创建新主题、补充别名、补充专属域名或拆分混杂簇。
+
+### `quality_report.json`
+
+这是分类质量报告，重点看：
+
+- `folder_only_classification_count` 是否为 0；
+- `low_confidence_normal_category_count` 是否为 0；
+- `generic_platform_domain_suggestion_count` 是否为 0；
+- `largest_generic_platform_cluster_size` 是否过大；
+- `largest_discovery_clusters` 和 `largest_tidy_clusters` 中是否存在需要补规则的主题。
+
+如果 `largest_generic_platform_cluster_size` 很大，通常说明 `GitHub / CSDN / 知乎 / StackOverflow` 等通用平台仍有导航词或来源词污染聚类，需要优先拆簇或降权，而不是把这些平台域名加入某个主题规则。
+
 ### 为什么导出后的总书签数会变多
 
 这是当前实现的设计结果，不是 bug。
@@ -158,8 +176,9 @@ python3 scripts/3_fetch_webpage_info.py --config skill_config.json --force-refet
 导入 Chrome 后，优先查看：
 
 1. `待审阅`
-2. `待确认`
-3. 主分类中你最常用的目录
+2. `待整理`
+3. `发现主题`
+4. 主分类中你最常用的目录
 
 建议处理方式：
 
@@ -169,6 +188,8 @@ python3 scripts/3_fetch_webpage_info.py --config skill_config.json --force-refet
 - `访问超时`：可在网络更稳定时再次补跑
 
 当前导出会优先把顶层目录合并成更少的展示分组，并尽量保留可读的叶子分类名称，减少书签栏最外层目录数量。
+旧 Chrome 文件夹路径只保留为上下文，不再作为主题分类强证据；这会让不确定内容更多进入 `待整理`，但能显著降低错误归入常用主题目录的概率。
+当前分类和聚类会共享结构化 `signal_pack`，优先消费用户备注、OG/Twitter 元信息、schema 类型、主正文、语言、canonical URL 和收藏时间桶；这比直接拼接网页标题和关键词更稳定。
 
 ## 环境建议
 

@@ -14,7 +14,11 @@ v1.2.0 在上一版基础上新增了几个实用能力：
 - 抓取缓存支持**增量复用**，重新执行时默认只重试非成功项，不重复抓取已成功书签。
 - 对 `知乎 / CSDN / GitHub / GitBook` 等高频反爬站点加入受信任访问策略，`403/406/429` 及部分抓取异常不再默认进入 `待审阅`。
 - 新增统一的待审阅异常报告，并在导出书签中增加顶层 `待审阅` 目录。
-- 导出层级增加展示分组，优先保留叶子分类并压平过深目录，减少书签栏最外层文件夹数量。
+- 分类不再把旧 Chrome 文件夹路径当作强证据，低置信内容进入 `待整理` 或 `发现主题`，减少历史文件夹造成的误分。
+- 分类和聚类共享结构化 `signal_pack`，会优先利用用户保存标题、用户备注、OpenGraph/Twitter 标题描述、schema 类型、主正文、语言、canonical URL 和收藏时间桶。
+- 对 `GitHub / CSDN / 知乎 / StackOverflow` 等通用平台，域名和平台导航词只作为来源信号，不再直接把不同主题内容拉成一个大簇。
+- 导出层级增加展示分组，默认使用 `技术主题 / 工具与平台 / 学习与资料 / 个人与生活 / 待整理 / 发现主题` 等顶层目录。
+- 新增规则建议和质量报告，用于持续改进通用规则与个人覆盖规则。
 - 支持清理抓取缓存或删除全部中间产物后重新开始。
 
 ## 使用入口
@@ -68,6 +72,8 @@ export all_proxy=socks5://127.0.0.1:7897
 - 失效链接报告：`output/reports/broken_links.json`
 - 待确认报告：`output/reports/needs_confirmation.json`
 - 待审阅异常报告：`output/reports/review_queue.json`
+- 规则建议报告：`output/reports/rule_suggestions.json`
+- 质量报告：`output/reports/quality_report.json`
 - 日志文件：`logs/bookmarks_organizer.log`
 
 ## 分步运行
@@ -106,8 +112,9 @@ python3 scripts/3_fetch_webpage_info.py --config skill_config.json --force-refet
 - 代理开关与代理地址；
 - 受信任站点待审阅策略；
 - 是否强制全量重抓；
-- 分类权重与确认阈值；
-- 聚类阈值、顶层展示分组与目录深度；
+- 分类权重、自动归类置信度与确认阈值；
+- 聚类阈值、通用平台域名、顶层展示分组与目录深度；
+- 默认规则和可选个人覆盖规则；
 - 日志级别与日志文件路径。
 
 > 注意：当你传入一个外部配置文件时，配置里的相对路径会相对于**该配置文件所在目录**解释。
@@ -151,10 +158,12 @@ python3 scripts/3_fetch_webpage_info.py --config skill_config.json --force-refet
 - 精简依赖。
 - 日志输出接入。
 - 分类 scoring 与关键词聚类优化。
-- 导出重复 URL / 失效链接 / 待确认 / 待审阅四类报告。
+- 导出重复 URL / 失效链接 / 待确认 / 待审阅 / 规则建议 / 质量评估报告。
 - 抓取缓存增量复用与失败重试。
 - 导出书签时保留原分类，同时把异常链接镜像到 `待审阅` 目录。
 - 修复聚类伪重复目录问题。
+- 移除旧 Chrome 文件夹路径对主题分类的强影响，改为基于页面内容、域名、标题、URL 和站点画像判定主题。
+- 增加结构化信息流：抓取层的 `og:*`、`twitter:*`、`schema_types`、`main_text_preview`、`lang`、`canonical_url`、`add_date` 会进入分类和聚类特征。
 
 ## 导出结果说明
 

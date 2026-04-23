@@ -1,4 +1,5 @@
 {
+  "schema_version": "category_rules/v2",
   "categories": {
     "编程语言/Go": {
       "domains": [
@@ -877,16 +878,151 @@
         "LAB",
         "实验"
       ]
+    },
+    "阅读资料": {
+      "domains": [
+        "gutenberg.org",
+        "archive.org"
+      ],
+      "keywords": [
+        "book",
+        "books",
+        "ebook",
+        "ebooks",
+        "library",
+        "read",
+        "reading",
+        "kindle",
+        "pdf",
+        "电子书",
+        "图书",
+        "阅读",
+        "书籍",
+        "文库"
+      ],
+      "title_patterns": [
+        "[Ee][Bb]ook",
+        "[Ll]ibrary",
+        "电子书",
+        "图书",
+        "阅读"
+      ],
+      "folder_keywords": []
+    },
+    "教育课程": {
+      "domains": [
+        "coursera.org",
+        "edx.org",
+        "mit.edu",
+        "cmu.edu"
+      ],
+      "keywords": [
+        "course",
+        "courses",
+        "lecture",
+        "lectures",
+        "schedule",
+        "homework",
+        "课程",
+        "课表",
+        "讲义"
+      ],
+      "title_patterns": [
+        "[Cc]ourse",
+        "[Ll]ecture",
+        "课程",
+        "课表"
+      ],
+      "folder_keywords": []
+    },
+    "个人服务": {
+      "domains": [],
+      "keywords": [
+        "dashboard",
+        "portal",
+        "account",
+        "login",
+        "webvpn",
+        "cloud drive",
+        "仪表盘",
+        "门户",
+        "登录",
+        "用户",
+        "云盘"
+      ],
+      "title_patterns": [
+        "[Dd]ashboard",
+        "[Pp]ortal",
+        "仪表盘",
+        "门户",
+        "登录"
+      ],
+      "folder_keywords": []
+    },
+    "娱乐": {
+      "domains": [],
+      "keywords": [
+        "game",
+        "games",
+        "video",
+        "music",
+        "movie",
+        "游戏",
+        "视频",
+        "音乐",
+        "电影"
+      ],
+      "title_patterns": [
+        "[Gg]ame",
+        "[Vv]ideo",
+        "游戏",
+        "视频"
+      ],
+      "folder_keywords": []
     }
   },
-  "default_category": "其他/未分类",
+  "default_category": "待整理",
   "scoring": {
     "domain_weight": 30,
     "keyword_weight": 40,
     "folder_weight": 25,
-    "content_weight": 5,
+    "content_weight": 15,
     "min_score": 15,
-    "confirm_threshold": 25
+    "confirm_threshold": 25,
+    "auto_assign_confidence": 0.55,
+    "confirm_confidence": 0.65
+  },
+  "non_topic_categories": [
+    "开源项目",
+    "技术博客",
+    "文档与教程",
+    "测试",
+    "配置开发环境"
+  ],
+  "generic_platform_domains": [
+    "github.com",
+    "github.io",
+    "gitlab.com",
+    "gitee.com",
+    "bitbucket.org",
+    "stackoverflow.com",
+    "stackexchange.com",
+    "medium.com",
+    "zhihu.com",
+    "csdn.net",
+    "51cto.com",
+    "docs.qq.com",
+    "qq.com",
+    "docs.google.com",
+    "google.com",
+    "notion.so",
+    "youtube.com",
+    "bilibili.com"
+  ],
+  "facets": {
+    "resource_types": {},
+    "intents": {},
+    "quality_signals": {}
   },
   "resource_type_rules": {
     "文档": {

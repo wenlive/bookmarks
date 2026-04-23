@@ -15,7 +15,7 @@ from bs4 import BeautifulSoup
 
 from common import build_parser, configure_logging, ensure_parent, load_config_from_args, normalize_fetch_url
 
-TEXT_PREVIEW_LIMIT = 500
+TEXT_PREVIEW_LIMIT = 1500
 GENERIC_TITLE_TOKENS = {
     "home", "index", "welcome", "untitled", "首页", "主页", "documentation", "docs", "untitled page"
 }
@@ -76,10 +76,11 @@ def split_domain_parts(netloc: str) -> tuple[str, str]:
 
 
 class SimpleResponse:
-    def __init__(self, status: int, url: str, html: str):
+    def __init__(self, status: int, url: str, html: str, headers: dict[str, str] | None = None):
         self.status = status
         self.url = url
         self.html = html
+        self.headers = headers or {}
 
 
 def normalize_metadata(metadata: dict | None) -> dict:
@@ -331,6 +332,14 @@ def extract_page_signals(soup: BeautifulSoup, resolved_url: str) -> dict:
         "h2": dedupe_preserve_order([node.get_text(" ", strip=True) for node in soup.find_all("h2")]),
     }
     nav_text = dedupe_preserve_order([text_preview(node, 200) for node in soup.find_all("nav")])
+    generator = get_meta_content(soup, "name", "generator")
+    code_languages: list[str] = []
+    for code_node in soup.find_all(["code", "pre"]):
+        classes = code_node.get("class") or []
+        for class_name in classes:
+            match = re.search(r"(?:language|lang)-([A-Za-z0-9_+#.-]+)", str(class_name))
+            if match:
+                code_languages.append(match.group(1))
     json_ld_types: list[str] = []
     for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
         raw = clean_text(script.string or script.get_text(" ", strip=True))
@@ -371,6 +380,8 @@ def extract_page_signals(soup: BeautifulSoup, resolved_url: str) -> dict:
         "nav_text": nav_text,
         "main_text_preview": text_preview(main_node),
         "schema_types": dedupe_preserve_order(json_ld_types),
+        "generator": generator,
+        "code_languages": dedupe_preserve_order(code_languages),
     }
     texts = [
         page_signals["title"],
@@ -383,6 +394,8 @@ def extract_page_signals(soup: BeautifulSoup, resolved_url: str) -> dict:
         *page_signals["headings"]["h1"],
         *page_signals["headings"]["h2"],
         *page_signals["schema_types"],
+        page_signals["generator"],
+        *page_signals["code_languages"],
     ]
     page_signals["page_type_hints"] = infer_page_type_hints(texts, extract_url_signals(resolved_url)["path_segments"])
     return page_signals
@@ -400,7 +413,13 @@ async def fetch_url(session: aiohttp.ClientSession, url: str, timeout: int, max_
             ) as response:
                 status = response.status
                 html = await response.text(errors="ignore")
-                return {"response": SimpleResponse(status=status, url=str(response.url), html=html)}
+                raw_headers = getattr(response, "headers", {}) or {}
+                response_headers = {
+                    key: value
+                    for key, value in raw_headers.items()
+                    if key.lower() in {"content-type", "server", "x-powered-by", "via"}
+                }
+                return {"response": SimpleResponse(status=status, url=str(response.url), html=html, headers=response_headers)}
         except asyncio.TimeoutError:
             error = {"fetch_status": "timeout", "error": "Request timeout"}
         except aiohttp.ClientError as exc:
@@ -425,6 +444,7 @@ async def fetch_with_aiohttp(session: aiohttp.ClientSession, url: str, timeout: 
             **url_signals,
             "fetch_status": "broken",
             "status_code": page_response.status,
+            "response_headers": page_response.headers,
             "error": f"HTTP {page_response.status}",
             "metadata_schema_version": "site_profile/v1",
         }
@@ -488,6 +508,7 @@ async def fetch_with_aiohttp(session: aiohttp.ClientSession, url: str, timeout: 
         **url_signals,
         "fetch_status": "success",
         "status_code": page_response.status,
+        "response_headers": page_response.headers,
         "page_signals": page_signals,
         "site_signals": site_signals,
         "site_profile": site_profile,

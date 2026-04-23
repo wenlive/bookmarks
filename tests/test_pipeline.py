@@ -71,6 +71,61 @@ def test_parse_bookmarks_normalizes_url_identity_but_keeps_distinct_fragments(tm
     }
 
 
+def test_parse_bookmarks_preserves_user_description_attributes(tmp_path):
+    sample = tmp_path / "sample.html"
+    sample.write_text(
+        """
+        <!DOCTYPE NETSCAPE-Bookmark-file-1>
+        <DL><p>
+          <DT><A HREF="https://example.com/a" ADD_DATE="1700000000" DESCRIPTION="user note">A</A>
+          <DT><A HREF="https://example.com/b" NOTES="manual context">B</A>
+        </DL><p>
+        """,
+        encoding="utf-8",
+    )
+
+    result = parse_bookmarks_module.parse_bookmarks(sample)
+
+    assert result["bookmarks"][0]["description"] == "user note"
+    assert result["bookmarks"][1]["notes"] == "manual context"
+
+
+def test_signal_pack_uses_structured_page_signals_and_schema_facets():
+    bookmark = {
+        "id": "bookmark_signal",
+        "name": "Saved API Note",
+        "url": "https://docs.example.com/ref",
+        "domain": "docs.example.com",
+        "add_date": "1700000000",
+        "description": "user supplied context",
+        "metadata": {
+            "title": "Noisy HTML Title - Example",
+            "description": "plain meta description",
+            "page_signals": {
+                "og:title": "Clean OG Title",
+                "twitter:title": "Twitter Title",
+                "og:description": "Clean OG description",
+                "main_text_preview": "API reference body with concrete examples",
+                "page_type_hints": ["documentation"],
+                "schema_types": ["TechArticle"],
+                "lang": "en",
+            },
+            "site_signals": {"site_name": "Example Docs", "brand_terms": ["Example"]},
+        },
+    }
+
+    signal_pack = common_module.build_signal_pack(bookmark)
+
+    assert signal_pack["preferred_title"] == "Saved API Note"
+    assert "Clean OG Title" in signal_pack["title_candidates"]
+    assert signal_pack["preferred_description"] == "user supplied context"
+    assert "文档" in signal_pack["resource_facets"]
+    assert "博客" in signal_pack["resource_facets"]
+    assert signal_pack["language"] == "en"
+    assert signal_pack["time_bucket"]["year_month"] == "2023-11"
+    assert "Clean OG Title" in signal_pack["semantic_text"]
+
+
 def test_copy_step_is_noop_for_same_file(tmp_path):
     source = tmp_path / "bookmarks.html"
     source.write_text("demo", encoding="utf-8")
@@ -643,6 +698,61 @@ def test_ambiguous_rule_roots_fall_back_to_discovery_root():
     assert next(iter(hierarchy["发现主题"]["subcategories"].values()))["count"] == 3
 
 
+def test_low_confidence_tidy_clusters_do_not_return_to_normal_roots():
+    clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2)
+    bookmarks = [
+        _bookmark(1, name="Maybe TiDB note", url="https://example.com/a", domain="example.com", category="待整理", folder=["TiDB"], resource_type="文档", description="tidb note", keywords="tidb"),
+        _bookmark(2, name="Maybe TiDB article", url="https://example.com/b", domain="example.com", category="待整理", folder=["TiDB"], resource_type="文档", description="tidb article", keywords="tidb"),
+    ]
+    for bookmark in bookmarks:
+        bookmark["classification"].update(
+            {
+                "display_category": "待整理",
+                "cluster_hints": ["TiDB"],
+                "open_topic_candidates": [{"topic": "TiDB", "score": 4, "sources": ["title"]}],
+                "rule_roots": [{"root": "数据库", "support": 1.0, "total": 20.0}],
+                "rule_confidence": 0.4,
+            }
+        )
+
+    profiles = cluster_module.build_cluster_payloads(
+        clusterer,
+        bookmarks,
+        threshold=20,
+        discovery_root_name="发现主题",
+        tidy_root_name="待整理",
+    )
+
+    assert profiles[0]["destination_root"] == "发现主题"
+    assert profiles[0]["average_rule_confidence"] == 0.4
+    assert profiles[0]["normal_category_support"] == 0
+
+
+def test_generic_platform_domain_does_not_force_unrelated_repos_into_one_cluster():
+    clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2, generic_platform_domains={"github.com"})
+    bookmarks = [
+        _bookmark(1, name="TiDB storage engine", url="https://github.com/pingcap/tidb", domain="github.com", category="数据库/TiDB", folder=["old"], resource_type="仓库", description="tidb tikv distributed database", keywords="tidb,tikv,database"),
+        _bookmark(2, name="TiKV raft kv store", url="https://github.com/tikv/tikv", domain="github.com", category="数据库/TiDB", folder=["old"], resource_type="仓库", description="tikv raft key value database", keywords="tikv,raft,database"),
+        _bookmark(3, name="FastAPI service template", url="https://github.com/example/fastapi-service", domain="github.com", category="后端开发/Python Web", folder=["old"], resource_type="仓库", description="fastapi python web api service", keywords="fastapi,python,api"),
+        _bookmark(4, name="FastAPI worker template", url="https://github.com/example/fastapi-worker", domain="github.com", category="后端开发/Python Web", folder=["old"], resource_type="仓库", description="fastapi python async worker", keywords="fastapi,python,async"),
+    ]
+    for bookmark in bookmarks:
+        category = bookmark["classification"]["category"]
+        root = category.split("/")[0]
+        bookmark["classification"].update(
+            {
+                "cluster_hints": [category.split("/")[-1], root],
+                "rule_roots": [{"root": root, "support": 1.0, "total": 90.0}],
+                "rule_confidence": 0.85,
+            }
+        )
+
+    clusters = clusterer.cluster_bookmarks(bookmarks)
+
+    assert sorted(len(cluster) for cluster in clusters) == [2, 2]
+    assert all(len({bookmark["classification"]["category"] for bookmark in cluster}) == 1 for cluster in clusters)
+
+
 def test_generate_rule_suggestions_reports_low_purity_clusters():
     bookmarks = [
         {"id": f"bookmark_{index}", "name": f"FastAPI {index}", "url": f"https://example.com/{index}", "domain": "example.com", "classification": {"category": "其他/未分类"}}
@@ -668,9 +778,10 @@ def test_generate_rule_suggestions_reports_low_purity_clusters():
     assert report["count"] == 1
     assert report["suggestions"][0]["cluster_label"] == "FastAPI"
     assert report["suggestions"][0]["type"] in {
-        "add_domain_to_existing_category",
-        "add_keywords_to_existing_category",
-        "create_new_leaf_category",
+        "add_specific_domain",
+        "add_alias",
+        "create_topic",
+        "split_mixed_cluster",
         "demote_noisy_keyword_or_folder_signal",
     }
 
@@ -683,8 +794,8 @@ def test_high_quality_folder_reused_and_low_quality_folder_split():
     ]
     high_hierarchy = clusterer.build_hierarchy(high_quality, "编程/Django", threshold=1)
     high_cluster = next(iter(high_hierarchy["subcategories"].values()))
-    assert high_cluster["source_folder_reused"] is True
-    assert high_cluster["source_folder_quality_score"] >= 0.68
+    assert high_cluster["source_folder_reused"] is False
+    assert high_cluster["source_folder_quality_score"] == 0.0
 
     low_quality = [
         _bookmark(3, name="Kubernetes 入门", url="https://kubernetes.io/docs/tutorials/", domain="kubernetes.io", category="运维/Kubernetes", folder=["杂项"], resource_type="文档", description="kubernetes cluster tutorial", keywords="kubernetes,cluster"),
@@ -922,6 +1033,7 @@ def test_cli_respects_config_and_creates_outputs(tmp_path):
     assert (tmp_path / "runtime" / "output" / "reports" / "needs_confirmation.json").exists()
     assert (tmp_path / "runtime" / "output" / "reports" / "duplicates.json").exists()
     assert (tmp_path / "runtime" / "output" / "reports" / "rule_suggestions.json").exists()
+    assert (tmp_path / "runtime" / "output" / "reports" / "quality_report.json").exists()
     assert (tmp_path / "runtime" / "logs" / "app.log").exists()
 
 
@@ -966,7 +1078,7 @@ def test_classifier_merges_rule_overrides_without_dropping_base_rules(tmp_path):
                     "编程语言/Python": {
                         "domains": [],
                         "keywords": ["python"],
-                        "title_patterns": [],
+                        "title_patterns": ["[Pp]ython"],
                         "folder_keywords": ["Python"],
                     }
                 },
@@ -1020,6 +1132,46 @@ def test_classifier_merges_rule_overrides_without_dropping_base_rules(tmp_path):
     assert any(item["signal"] == "domain" for item in domain_hit["classification_evidence"]["topic_scores"][0]["evidence"])
     assert keyword_hit["category"] == "编程语言/Python"
     assert any(item["signal"] == "keywords" for item in keyword_hit["classification_evidence"]["topic_scores"][0]["evidence"])
+
+    overrides_file.write_text(
+        json.dumps(
+            {
+                "topics": {
+                    "编程语言/Go": {
+                        "domains": ["go.dev"],
+                        "keywords": ["golang"],
+                        "title_patterns": ["[Gg]olang"],
+                        "folder_keywords": [],
+                    }
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    classifier = classify_module.BookmarkClassifier(rules_file, overrides_file=overrides_file)
+    go_hit = classifier.classify_bookmark(
+        {
+            "id": "bookmark_topic_override",
+            "name": "Golang release notes",
+            "url": "https://go.dev/doc/devel/release",
+            "domain": "go.dev",
+            "original_folder_path": ["学习"],
+            "metadata": build_metadata("Golang release notes", "", "golang", "Go", "golang docs"),
+        }
+    )
+    python_still_hit = classifier.classify_bookmark(
+        {
+            "id": "bookmark_base_still_present",
+            "name": "Python packaging notes",
+            "url": "https://example.com/python-packaging",
+            "domain": "example.com",
+            "original_folder_path": ["学习"],
+            "metadata": build_metadata("Python packaging notes", "", "python", "Example", "python docs"),
+        }
+    )
+    assert go_hit["category"] == "编程语言/Go"
+    assert python_still_hit["category"] == "编程语言/Python"
 
 
 
@@ -1144,9 +1296,227 @@ def test_classifier_treats_folder_as_weak_prior_and_reports_low_confidence():
         item["topic"] == "分布式系统/Kubernetes" for item in classification["classification_evidence"]["topic_scores"]
     )
     assert classification["folder_alignment_score"] == 0
-    assert stats["low_confidence_items"][0]["id"] == "bookmark_folder_bias"
+    assert stats["low_confidence_normal_category_count"] == 0
     assert "resource_type_distribution" in stats
     assert "uncovered_topic_candidates" in stats
+
+
+def test_classifier_ignores_stale_chrome_folder_for_topic_assignment():
+    rules_file = ROOT / "data" / "category_rules.json"
+    classifier = classify_module.BookmarkClassifier(rules_file)
+    chrome_extension = {
+        "id": "bookmark_chrome_extension",
+        "name": "Chrome 扩展程序 | Chrome Extensions | Chrome for Developers",
+        "url": "https://developer.chrome.com/docs/extensions",
+        "domain": "developer.chrome.com",
+        "original_folder_path": ["数据库", "PostgreSQL", "TiDB"],
+        "metadata": {
+            "title": "Chrome 扩展程序 | Chrome Extensions | Chrome for Developers",
+            "description": "了解如何开发 Chrome 扩展程序。",
+            "keywords": "chrome extensions web",
+            "site_profile": {
+                "site": {"site_name": "Chrome for Developers", "brand_terms": ["Chrome", "Extensions"]},
+                "page": {"page_type_hints": ["documentation"]},
+            },
+        },
+    }
+    stackoverflow_go = {
+        "id": "bookmark_stackoverflow_go",
+        "name": "How to Return Nil String in Go? - Stack Overflow",
+        "url": "https://stackoverflow.com/questions/52255683/how-to-return-nil-string-in-go",
+        "domain": "stackoverflow.com",
+        "original_folder_path": ["数据库", "TiDB"],
+        "metadata": {},
+    }
+
+    chrome_classification = classifier.classify_bookmark(chrome_extension)
+    go_classification = classifier.classify_bookmark(stackoverflow_go)
+
+    assert chrome_classification["category"] == "待整理"
+    assert not chrome_classification["primary_topics"]
+    assert go_classification["category"] == "待整理"
+    assert "数据库/TiDB" not in go_classification["primary_topics"]
+    assert go_classification["folder_alignment_score"] == 0.0
+
+
+def test_classifier_suppresses_generic_platform_open_topics():
+    rules_file = ROOT / "data" / "category_rules.json"
+    classifier = classify_module.BookmarkClassifier(rules_file)
+    bookmark = {
+        "id": "bookmark_generic_platform",
+        "name": "GitHub - example/postgres-tool: PostgreSQL backup utility",
+        "url": "https://github.com/example/postgres-tool",
+        "domain": "github.com",
+        "original_folder_path": ["数据库"],
+        "metadata": {
+            "title": "GitHub - example/postgres-tool",
+            "description": "PostgreSQL backup utility repository",
+            "keywords": "postgresql, backup, repository",
+            "site_profile": {
+                "site": {"site_name": "GitHub", "brand_terms": ["GitHub"]},
+                "page": {"og:title": "GitHub - example/postgres-tool"},
+            },
+        },
+    }
+
+    classification = classifier.classify_bookmark(bookmark)
+
+    open_topics = {candidate["topic"].lower() for candidate in classification["open_topic_candidates"]}
+    assert "github" not in open_topics
+    assert "repository" not in open_topics
+    assert all("github" not in hint.lower() for hint in classification["cluster_hints"])
+
+
+def test_classifier_caps_untrusted_fetch_failures_to_tidy():
+    rules_file = ROOT / "data" / "category_rules.json"
+    classifier = classify_module.BookmarkClassifier(rules_file)
+    bookmark = {
+        "id": "bookmark_untrusted_failure",
+        "name": "TiDB Architecture Guide",
+        "url": "https://book.tidb.io/session/architecture.html",
+        "domain": "book.tidb.io",
+        "original_folder_path": ["数据库", "TiDB"],
+        "metadata": {
+            "title": "TiDB Architecture Guide",
+            "description": "TiDB distributed database architecture",
+            "keywords": "tidb,tikv,pingcap",
+            "fetch_status": "error",
+            "link_health": {
+                "review_required": True,
+                "trusted_override": False,
+                "reason_label": "DNS/连接失败",
+                "reason_code": "dns_connection",
+            },
+        },
+    }
+
+    classification = classifier.classify_bookmark(bookmark)
+
+    assert classification["category"] == "待整理"
+    assert classification["review_required"] is True
+    assert classification["rule_confidence"] <= 0.45
+    assert "待审阅" in classification["quality_signals"]
+    assert any(item["category"] == "数据库/TiDB" for item in classification["rule_candidates"])
+
+
+def test_classifier_uses_general_reading_topic_without_personal_rules():
+    rules_file = ROOT / "data" / "category_rules.json"
+    classifier = classify_module.BookmarkClassifier(rules_file)
+    bookmark = {
+        "id": "bookmark_gutenberg",
+        "name": "Free eBooks | Project Gutenberg",
+        "url": "https://m.gutenberg.org/",
+        "domain": "m.gutenberg.org",
+        "original_folder_path": ["数据库", "TiDB"],
+        "metadata": {
+            "title": "Free eBooks | Project Gutenberg",
+            "description": "Project Gutenberg is a library of free eBooks.",
+            "keywords": "books, ebooks, free, kindle",
+            "site_profile": {
+                "site": {"site_name": "Project Gutenberg", "brand_terms": ["Project", "Gutenberg", "eBooks"]},
+                "page": {"h1": "Project Gutenberg is a library of over 75000 free eBooks"},
+            },
+        },
+    }
+
+    classification = classifier.classify_bookmark(bookmark)
+
+    assert classification["category"] == "阅读资料"
+    assert classification["rule_confidence"] >= 0.65
+    assert "阅读资料" in classification["primary_topics"]
+
+
+def test_rule_suggestions_do_not_bind_generic_platform_domains():
+    report = cluster_module.generate_rule_suggestions(
+        [
+            {
+                "cluster_id": "cluster_docs",
+                "cluster_label": "腾讯文档",
+                "rule_purity": 0.2,
+                "destination_root": "发现主题",
+                "dominant_categories": [{"category": "待整理", "root": "待整理", "count": 4, "share": 1.0}],
+                "top_domains": [{"domain": "qq.com", "count": 4, "share": 1.0}],
+                "representative_tokens": ["腾讯文档", "在线文档"],
+                "discovered_topics": ["腾讯文档"],
+                "bookmarks": [
+                    {"id": f"bookmark_{index}", "name": f"Doc {index}", "url": f"https://docs.qq.com/doc/{index}", "domain": "docs.qq.com", "classification": {"category": "待整理"}}
+                    for index in range(4)
+                ],
+            }
+        ],
+        discovery_root_name="发现主题",
+        generic_platform_domains={"qq.com", "docs.qq.com"},
+    )
+
+    assert report["count"] == 1
+    assert report["suggestions"][0]["proposed_domains"] == []
+    assert report["suggestions"][0]["type"] == "create_topic"
+
+
+def test_quality_report_tracks_folder_and_generic_domain_metrics():
+    bookmarks = [
+        {
+            "id": "bookmark_tidy",
+            "name": "Untitled",
+            "url": "https://docs.qq.com/doc/1",
+            "domain": "docs.qq.com",
+            "classification": {
+                "category": "待整理",
+                "needs_confirmation": True,
+                "classification_evidence": {"topic_scores": []},
+            },
+        }
+    ]
+    suggestions = {
+        "suggestions": [
+            {
+                "type": "create_topic",
+                "proposed_domains": [],
+            }
+        ]
+    }
+    report = cluster_module.generate_quality_report(
+        bookmarks,
+        [
+            {
+                "cluster_id": "cluster_docs",
+                "cluster_label": "腾讯文档",
+                "destination_root": "待整理",
+                "dominant_categories": [{"category": "待整理", "share": 1.0}],
+                "representative_tokens": ["腾讯文档"],
+                "bookmarks": bookmarks,
+            }
+        ],
+        suggestions,
+        generic_platform_domains={"qq.com", "docs.qq.com"},
+    )
+
+    assert report["metrics"]["folder_only_classification_count"] == 0
+    assert report["metrics"]["low_confidence_normal_category_count"] == 0
+    assert report["metrics"]["generic_platform_domain_suggestion_count"] == 0
+    assert report["metrics"]["tidy_cluster_count"] == 1
+    platform_report = cluster_module.generate_quality_report(
+        bookmarks,
+        [
+            {
+                "cluster_id": "cluster_github",
+                "cluster_label": "GitHub",
+                "destination_root": "发现主题",
+                "dominant_categories": [
+                    {"category": "数据库/TiDB", "share": 0.5},
+                    {"category": "后端开发/Python Web", "share": 0.5},
+                ],
+                "top_domains": [{"domain": "github.com", "share": 1.0}],
+                "representative_tokens": ["github"],
+                "bookmarks": bookmarks * 5,
+            }
+        ],
+        {"suggestions": []},
+        generic_platform_domains={"github.com"},
+    )
+    assert platform_report["metrics"]["generic_platform_cluster_count"] == 1
+    assert platform_report["metrics"]["largest_generic_platform_cluster_size"] == 5
+    assert platform_report["largest_generic_platform_clusters"][0]["generic_platform_share"] == 1.0
 
 
 def test_topic_collection_is_deterministic_for_same_inputs():
@@ -1230,14 +1600,13 @@ def test_build_display_hierarchy_groups_top_level_roots_for_human_browsing():
         common_module.DEFAULT_DISPLAY_OPTIONS,
     )
 
-    assert list(display_hierarchy) == ["数据库与存储", "编程开发"]
-    assert display_hierarchy["数据库与存储"]["subcategories"] == {}
-    assert display_hierarchy["编程开发"]["subcategories"] == {}
-    assert len(display_hierarchy["数据库与存储"]["bookmarks"]) == 2
-    assert len(display_hierarchy["编程开发"]["bookmarks"]) == 2
+    assert list(display_hierarchy) == ["技术主题"]
+    assert set(display_hierarchy["技术主题"]["subcategories"]) == {"数据库", "编程语言"}
+    assert len(display_hierarchy["技术主题"]["subcategories"]["数据库"]["bookmarks"]) == 2
+    assert len(display_hierarchy["技术主题"]["subcategories"]["编程语言"]["bookmarks"]) == 2
 
     html = html_module.BookmarkHTMLGenerator().generate_html(display_hierarchy)
-    assert html.find("数据库与存储") < html.find("编程开发")
+    assert html.find("数据库") < html.find("编程语言")
 
 
 def test_build_display_hierarchy_does_not_duplicate_discovery_root_when_already_grouped():

@@ -17,7 +17,8 @@
     "broken_links_report_file": "output/reports/broken_links.json",
     "confirmation_report_file": "output/reports/needs_confirmation.json",
     "review_report_file": "output/reports/review_queue.json",
-    "rule_suggestions_report_file": "output/reports/rule_suggestions.json"
+    "rule_suggestions_report_file": "output/reports/rule_suggestions.json",
+    "quality_report_file": "output/reports/quality_report.json"
   },
   "fetch_options": {
     "concurrent_limit": 15,
@@ -75,7 +76,9 @@
     "keyword_weight": 40,
     "title_weight": 20,
     "folder_weight": 25,
-    "content_weight": 5
+    "content_weight": 15,
+    "auto_assign_confidence": 0.55,
+    "confirm_confidence": 0.65
   },
   "clustering_options": {
     "min_cluster_size": 10,
@@ -83,20 +86,41 @@
     "max_bookmarks_without_clustering": 20,
     "domain_split_min_size": 4,
     "discovery_root_name": "发现主题",
+    "tidy_root_name": "待整理",
+    "generic_platform_domains": [
+      "github.com",
+      "github.io",
+      "gitlab.com",
+      "gitee.com",
+      "bitbucket.org",
+      "stackoverflow.com",
+      "stackexchange.com",
+      "medium.com",
+      "zhihu.com",
+      "csdn.net",
+      "51cto.com",
+      "docs.qq.com",
+      "qq.com",
+      "docs.google.com",
+      "google.com",
+      "notion.so",
+      "youtube.com",
+      "bilibili.com"
+    ],
     "root_groups": [
-      {"name": "数据库与存储", "roots": ["数据库"]},
-      {"name": "编程开发", "roots": ["编程语言", "前端开发", "后端开发", "网络编程", "配置开发环境"]},
-      {"name": "基础设施与运维", "roots": ["分布式系统", "云服务", "DevOps", "Linux系统", "安全"]},
-      {"name": "AI与研究", "roots": ["机器学习", "算法与数据结构", "论文与研究"]},
-      {"name": "工程工具与资源", "roots": ["开发工具", "文档与教程", "开源项目", "技术博客", "测试"]},
-      {"name": "实验与杂项", "roots": ["实验项目", "其他/未分类"]}
+      {"name": "技术主题", "roots": ["数据库", "编程语言", "前端开发", "后端开发", "网络编程", "分布式系统", "消息队列", "云服务", "DevOps", "Linux系统", "操作系统", "安全", "机器学习", "算法与数据结构", "文件格式"]},
+      {"name": "工具与平台", "roots": ["开发工具", "实验项目", "公司资源"]},
+      {"name": "学习与资料", "roots": ["论文与研究", "阅读资料", "教育课程"]},
+      {"name": "个人与生活", "roots": ["个人服务", "娱乐"]},
+      {"name": "待整理", "roots": ["待整理", "其他/未分类"]}
     ],
     "display": {
       "max_depth": 3,
       "collapse_single_child": true,
       "prefer_human_labels": true,
-      "fallback_group_name": "实验与杂项",
-      "discovery_root_name": "发现主题"
+      "fallback_group_name": "待整理",
+      "discovery_root_name": "发现主题",
+      "tidy_root_name": "待整理"
     }
   },
   "logging": {

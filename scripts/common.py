@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import urlsplit, urlunsplit
@@ -43,19 +45,84 @@ DEFAULT_TRUSTED_ACCESS_POLICY = {
     ],
 }
 DEFAULT_ROOT_GROUPS = [
-    {"name": "数据库与存储", "roots": ["数据库"]},
-    {"name": "编程开发", "roots": ["编程语言", "前端开发", "后端开发", "网络编程", "配置开发环境"]},
-    {"name": "基础设施与运维", "roots": ["分布式系统", "云服务", "DevOps", "Linux系统", "安全"]},
-    {"name": "AI与研究", "roots": ["机器学习", "算法与数据结构", "论文与研究"]},
-    {"name": "工程工具与资源", "roots": ["开发工具", "文档与教程", "开源项目", "技术博客", "测试"]},
-    {"name": "实验与杂项", "roots": ["实验项目", "其他/未分类"]},
+    {"name": "技术主题", "roots": ["数据库", "编程语言", "前端开发", "后端开发", "网络编程", "分布式系统", "消息队列", "云服务", "DevOps", "Linux系统", "操作系统", "安全", "机器学习", "算法与数据结构", "文件格式"]},
+    {"name": "工具与平台", "roots": ["开发工具", "实验项目", "公司资源"]},
+    {"name": "学习与资料", "roots": ["论文与研究", "阅读资料", "教育课程"]},
+    {"name": "个人与生活", "roots": ["个人服务", "娱乐"]},
+    {"name": "待整理", "roots": ["待整理", "其他/未分类"]},
 ]
 DEFAULT_DISPLAY_OPTIONS = {
     "max_depth": 3,
     "collapse_single_child": True,
     "prefer_human_labels": True,
-    "fallback_group_name": "实验与杂项",
+    "fallback_group_name": "待整理",
     "discovery_root_name": "发现主题",
+    "tidy_root_name": "待整理",
+}
+DEFAULT_GENERIC_PLATFORM_DOMAINS = {
+    "github.com",
+    "github.io",
+    "gitlab.com",
+    "gitee.com",
+    "bitbucket.org",
+    "stackoverflow.com",
+    "stackexchange.com",
+    "medium.com",
+    "zhihu.com",
+    "csdn.net",
+    "51cto.com",
+    "docs.qq.com",
+    "qq.com",
+    "docs.google.com",
+    "google.com",
+    "notion.so",
+    "youtube.com",
+    "bilibili.com",
+}
+GENERIC_PLATFORM_TOKENS = {
+    "github",
+    "gitlab",
+    "gitee",
+    "bitbucket",
+    "stackoverflow",
+    "stack",
+    "overflow",
+    "medium",
+    "zhihu",
+    "zhuanlan",
+    "csdn",
+    "51cto",
+    "qq",
+    "google",
+    "notion",
+    "youtube",
+    "bilibili",
+    "repository",
+    "repositories",
+    "repo",
+    "code",
+    "search",
+    "users",
+    "issues",
+    "pull",
+    "requests",
+    "source",
+    "master",
+    "main",
+    "branch",
+    "branches",
+    "commit",
+    "commits",
+    "stars",
+    "forks",
+    "watch",
+    "actions",
+    "projects",
+    "insights",
+    "releases",
+    "details",
+    "article",
+    "weixin",
 }
 
 
@@ -77,6 +144,7 @@ class PipelinePaths:
     confirmation_report_file: Path
     review_report_file: Path
     rule_suggestions_report_file: Path
+    quality_report_file: Path
 
 
 class JsonFormatter(logging.Formatter):
@@ -101,6 +169,7 @@ DEFAULT_PATHS = {
     "confirmation_report_file": ROOT_DIR / "output" / "reports" / "needs_confirmation.json",
     "review_report_file": ROOT_DIR / "output" / "reports" / "review_queue.json",
     "rule_suggestions_report_file": ROOT_DIR / "output" / "reports" / "rule_suggestions.json",
+    "quality_report_file": ROOT_DIR / "output" / "reports" / "quality_report.json",
 }
 
 
@@ -156,6 +225,205 @@ def normalize_fetch_url(url: str) -> str:
     return normalize_url(url, keep_fragment=False)
 
 
+def domain_matches_suffix(domain: str, suffix: str) -> bool:
+    domain = (domain or "").lower().strip(".")
+    suffix = (suffix or "").lower().strip(".")
+    return bool(domain and suffix and (domain == suffix or domain.endswith(f".{suffix}")))
+
+
+def is_generic_platform_domain(domain: str, generic_domains: set[str] | None = None) -> bool:
+    domains = generic_domains or DEFAULT_GENERIC_PLATFORM_DOMAINS
+    return any(domain_matches_suffix(domain, suffix) for suffix in domains)
+
+
+SCHEMA_TYPE_RESOURCE_FACETS = {
+    "article": "博客",
+    "blogposting": "博客",
+    "techarticle": "博客",
+    "newsarticle": "博客",
+    "creativework": "阅读资料",
+    "book": "阅读资料",
+    "course": "教育课程",
+    "learningresource": "教育课程",
+    "softwareapplication": "工具",
+    "webapplication": "工具",
+    "product": "产品",
+    "organization": "组织",
+    "scholarlyarticle": "论文",
+    "report": "论文",
+}
+
+PAGE_TYPE_RESOURCE_FACETS = {
+    "documentation": "文档",
+    "blog": "博客",
+    "product": "产品",
+    "tool": "工具",
+    "repository": "仓库",
+    "research": "论文",
+}
+
+
+def _clean_signal_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _as_text_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        raw_values = value
+    elif isinstance(value, tuple):
+        raw_values = list(value)
+    else:
+        raw_values = [value]
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in raw_values:
+        normalized = _clean_signal_text(item)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            result.append(normalized)
+    return result
+
+
+def _first_non_empty(*values: Any) -> str:
+    for value in values:
+        normalized = _clean_signal_text(value)
+        if normalized:
+            return normalized
+    return ""
+
+
+def _metadata_profile_blocks(metadata: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    page = metadata.get("page_signals", {}) if isinstance(metadata.get("page_signals"), dict) else {}
+    site = metadata.get("site_signals", {}) if isinstance(metadata.get("site_signals"), dict) else {}
+    profile = metadata.get("site_profile", {}) if isinstance(metadata.get("site_profile"), dict) else {}
+    page_profile = profile.get("page", {}) if isinstance(profile.get("page"), dict) else {}
+    site_profile = profile.get("site", {}) if isinstance(profile.get("site"), dict) else {}
+    return page, site, page_profile, site_profile
+
+
+def _bookmark_time_bucket(add_date: Any) -> dict[str, str]:
+    raw = _clean_signal_text(add_date)
+    if not raw:
+        return {}
+    try:
+        timestamp = int(float(raw))
+    except ValueError:
+        return {}
+    if timestamp <= 0:
+        return {}
+    dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+    iso_year, iso_week, _ = dt.isocalendar()
+    return {
+        "year": f"{dt.year:04d}",
+        "year_month": f"{dt.year:04d}-{dt.month:02d}",
+        "year_week": f"{iso_year:04d}-W{iso_week:02d}",
+    }
+
+
+def build_signal_pack(bookmark: dict[str, Any]) -> dict[str, Any]:
+    """Build stable classification/clustering signals from raw bookmark data."""
+    metadata = bookmark.get("metadata", {}) if isinstance(bookmark.get("metadata"), dict) else {}
+    page, site, page_profile, site_profile = _metadata_profile_blocks(metadata)
+
+    saved_name = _clean_signal_text(bookmark.get("name"))
+    og_title = _first_non_empty(page.get("og:title"), page_profile.get("og:title"))
+    twitter_title = _first_non_empty(page.get("twitter:title"), page_profile.get("twitter:title"))
+    h1 = _first_non_empty(metadata.get("h1"), page.get("h1"), page_profile.get("h1"))
+    html_title = _first_non_empty(metadata.get("title"), page.get("title"), page_profile.get("title"))
+    preferred_title = _first_non_empty(saved_name, og_title, twitter_title, h1, html_title)
+    title_candidates = _as_text_list([saved_name, og_title, twitter_title, h1, html_title])
+
+    user_description = _first_non_empty(
+        bookmark.get("description"),
+        bookmark.get("notes"),
+        bookmark.get("description_attr"),
+        bookmark.get("notes_attr"),
+    )
+    og_description = _first_non_empty(page.get("og:description"), page_profile.get("og:description"))
+    twitter_description = _first_non_empty(page.get("twitter:description"), page_profile.get("twitter:description"))
+    meta_description = _first_non_empty(metadata.get("description"), page.get("description"), page_profile.get("description"))
+    main_text = _first_non_empty(page.get("main_text_preview"), page_profile.get("main_text_preview"), metadata.get("content_preview"), page.get("content_preview"), page_profile.get("content_preview"))
+    preferred_description = _first_non_empty(user_description, og_description, twitter_description, meta_description, main_text)
+
+    page_type_hints = _as_text_list(page.get("page_type_hints") or page_profile.get("page_type_hints"))
+    site_type_candidates = _as_text_list(site.get("site_type_candidates") or site_profile.get("site_type_candidates"))
+    schema_types = _as_text_list(page.get("schema_types") or page_profile.get("schema_types"))
+    code_languages = _as_text_list(page.get("code_languages") or page_profile.get("code_languages"))
+    resource_facets: list[str] = []
+    for hint in page_type_hints + site_type_candidates:
+        mapped = PAGE_TYPE_RESOURCE_FACETS.get(hint.lower())
+        if mapped:
+            resource_facets.append(mapped)
+    for schema_type in schema_types:
+        normalized_schema = schema_type.rsplit("/", 1)[-1].lower()
+        mapped = SCHEMA_TYPE_RESOURCE_FACETS.get(normalized_schema)
+        if mapped:
+            resource_facets.append(mapped)
+    resource_facets = _as_text_list(resource_facets)
+
+    site_name = _first_non_empty(site.get("site_name"), site_profile.get("site_name"), page.get("og:site_name"), page_profile.get("og:site_name"))
+    brand_terms = _as_text_list(site.get("brand_terms") or site_profile.get("brand_terms"))
+    source_facets = _as_text_list([site_name, metadata.get("registrable_domain"), bookmark.get("domain"), *brand_terms])
+
+    language = _first_non_empty(page.get("lang"), page_profile.get("lang"), site.get("content_language"), site_profile.get("content_language"))
+    link_health = metadata.get("link_health", {}) if isinstance(metadata.get("link_health"), dict) else {}
+    quality_facets = []
+    if metadata.get("fetch_status") == "success":
+        quality_facets.append("抓取成功")
+    if link_health.get("review_required"):
+        quality_facets.append("待审阅")
+    if link_health.get("trusted_override"):
+        quality_facets.append("受信任访问")
+
+    canonical_identity = _first_non_empty(
+        page.get("canonical_url"),
+        page_profile.get("canonical_url"),
+        metadata.get("canonical_url"),
+        metadata.get("normalized_url"),
+        bookmark.get("fetch_normalized_url"),
+        normalize_fetch_url(bookmark.get("url", "")),
+    )
+    semantic_parts = [
+        " ".join(title_candidates),
+        preferred_description,
+        _clean_signal_text(metadata.get("keywords") or page.get("keywords") or page_profile.get("keywords")),
+        h1,
+        main_text,
+        " ".join(page_type_hints),
+        " ".join(site_type_candidates),
+        " ".join(schema_types),
+        _first_non_empty(page.get("generator"), page_profile.get("generator")),
+        " ".join(code_languages),
+        site_name,
+        " ".join(brand_terms),
+    ]
+
+    return {
+        "schema_version": "signal_pack/v1",
+        "preferred_title": preferred_title,
+        "preferred_description": preferred_description,
+        "semantic_text": " ".join(part for part in semantic_parts if part),
+        "main_text": main_text,
+        "title_candidates": title_candidates,
+        "description_candidates": _as_text_list([user_description, og_description, twitter_description, meta_description, main_text]),
+        "page_type_hints": page_type_hints,
+        "site_type_candidates": site_type_candidates,
+        "schema_types": schema_types,
+        "generator": _first_non_empty(page.get("generator"), page_profile.get("generator")),
+        "code_languages": code_languages,
+        "resource_facets": resource_facets,
+        "source_facets": source_facets,
+        "quality_facets": _as_text_list(quality_facets),
+        "language": language,
+        "time_bucket": _bookmark_time_bucket(bookmark.get("add_date")),
+        "canonical_identity": canonical_identity,
+        "link_health": link_health,
+        "original_folder_path": bookmark.get("original_folder_path", []),
+    }
+
+
 def pipeline_generated_paths(config: "PipelineConfig") -> dict[str, list[Path]]:
     paths = config.paths
     files = [
@@ -197,6 +465,7 @@ class PipelineConfig:
             confirmation_report_file=_resolve_path(raw.get("output", {}).get("confirmation_report_file"), reports_dir / "needs_confirmation.json", self.base_dir),
             review_report_file=_resolve_path(raw.get("output", {}).get("review_report_file"), reports_dir / "review_queue.json", self.base_dir),
             rule_suggestions_report_file=_resolve_path(raw.get("output", {}).get("rule_suggestions_report_file"), reports_dir / "rule_suggestions.json", self.base_dir),
+            quality_report_file=_resolve_path(raw.get("output", {}).get("quality_report_file"), reports_dir / "quality_report.json", self.base_dir),
         )
         proxy_options = raw.get("fetch_options", {}).get("proxy", {})
         review_policy = raw.get("fetch_options", {}).get("review_policy", {})

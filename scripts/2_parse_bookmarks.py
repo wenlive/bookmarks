@@ -73,6 +73,8 @@ def parse_bookmarks(html_file: Path) -> dict:
                 "original_folder_path": get_folder_path(a),
                 "add_date": a.get("add_date", ""),
                 "icon": a.get("icon", ""),
+                "description": a.get("description", "") or a.get("desc", ""),
+                "notes": a.get("notes", ""),
                 "metadata": {},
             }
         )
