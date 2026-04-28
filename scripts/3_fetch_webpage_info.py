@@ -5,15 +5,23 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import warnings
 from collections import Counter
 from pathlib import Path
 from typing import Dict
 from urllib.parse import parse_qsl, urljoin, urlparse
 
 import aiohttp
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 
-from common import build_parser, configure_logging, ensure_parent, load_config_from_args, normalize_fetch_url
+from common import (
+    FETCH_OUTPUT_SCHEMA_VERSION,
+    build_parser,
+    configure_logging,
+    ensure_parent,
+    load_config_from_args,
+    normalize_fetch_url,
+)
 
 TEXT_PREVIEW_LIMIT = 1500
 GENERIC_TITLE_TOKENS = {
@@ -239,6 +247,26 @@ def merge_with_metadata(bookmark: dict, metadata: dict, review_policy: dict | No
     return enriched
 
 
+def fetch_route_configured(proxy_options: dict | None) -> bool:
+    options = proxy_options or {}
+    explicit_proxy = any(options.get(key) for key in ("http_proxy", "https_proxy", "all_proxy"))
+    return bool(options.get("enabled") and (options.get("trust_env") or explicit_proxy))
+
+
+def build_fetch_context(proxy_options: dict | None, *, attempts: int, resolved_proxy: str | None = None) -> dict:
+    options = proxy_options or {}
+    explicit_proxy = any(options.get(key) for key in ("http_proxy", "https_proxy", "all_proxy"))
+    route = "proxy" if fetch_route_configured(options) else "direct"
+    return {
+        "route": route,
+        "attempts": attempts,
+        "proxy_configured": route == "proxy",
+        "proxy_explicit": explicit_proxy,
+        "proxy_trust_env": bool(options.get("trust_env")),
+        "resolved_proxy": resolved_proxy or "",
+    }
+
+
 def resolve_proxy_for_url(url: str, proxy_options: dict) -> str | None:
     if not proxy_options.get("enabled"):
         return None
@@ -289,6 +317,14 @@ def infer_site_types(page_hints: list[str], homepage_hints: list[str], homepage_
     if any(token in homepage_text for token in ("github", "gitlab", "bitbucket")) and "repository" not in combined:
         combined.append("repository")
     return combined or ["general"]
+
+
+def parse_response_soup(html: str, headers: dict[str, str] | None = None) -> BeautifulSoup:
+    content_type = clean_text((headers or {}).get("content-type", "")).lower()
+    parser = "xml" if "xml" in content_type else "lxml"
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+        return BeautifulSoup(html, parser)
 
 
 def build_brand_terms(site_name: str, registrable_domain: str, title: str) -> list[str]:
@@ -419,24 +455,44 @@ async def fetch_url(session: aiohttp.ClientSession, url: str, timeout: int, max_
                     for key, value in raw_headers.items()
                     if key.lower() in {"content-type", "server", "x-powered-by", "via"}
                 }
-                return {"response": SimpleResponse(status=status, url=str(response.url), html=html, headers=response_headers)}
+                return {
+                    "response": SimpleResponse(status=status, url=str(response.url), html=html, headers=response_headers),
+                    "fetch_context": build_fetch_context(proxy_options, attempts=attempt + 1, resolved_proxy=proxy),
+                }
         except asyncio.TimeoutError:
-            error = {"fetch_status": "timeout", "error": "Request timeout"}
+            error = {
+                "fetch_status": "timeout",
+                "error": "Request timeout",
+                "fetch_context": build_fetch_context(proxy_options, attempts=attempt + 1, resolved_proxy=proxy),
+            }
         except aiohttp.ClientError as exc:
-            error = {"fetch_status": "error", "error": str(exc)}
+            error = {
+                "fetch_status": "error",
+                "error": str(exc),
+                "fetch_context": build_fetch_context(proxy_options, attempts=attempt + 1, resolved_proxy=proxy),
+            }
         except Exception as exc:  # noqa: BLE001
-            error = {"fetch_status": "error", "error": str(exc)}
+            error = {
+                "fetch_status": "error",
+                "error": str(exc),
+                "fetch_context": build_fetch_context(proxy_options, attempts=attempt + 1, resolved_proxy=proxy),
+            }
 
         if attempt == max_retries:
             return error
-    return {"fetch_status": "error", "error": "Unknown error"}
+    return {
+        "fetch_status": "error",
+        "error": "Unknown error",
+        "fetch_context": build_fetch_context(proxy_options, attempts=max_retries + 1, resolved_proxy=proxy),
+    }
 
 
 async def fetch_with_aiohttp(session: aiohttp.ClientSession, url: str, timeout: int, max_retries: int, proxy_options: dict) -> Dict:
     url_signals = extract_url_signals(url)
     page_fetch = await fetch_url(session, url, timeout, max_retries, proxy_options)
+    fetch_context = page_fetch.get("fetch_context") or build_fetch_context(proxy_options, attempts=max_retries + 1)
     if "response" not in page_fetch:
-        return normalize_metadata({**url_signals, **page_fetch, "metadata_schema_version": "site_profile/v1"})
+        return normalize_metadata({**url_signals, **page_fetch, "fetch_context": fetch_context, "metadata_schema_version": "site_profile/v1"})
 
     page_response: SimpleResponse = page_fetch["response"]
     if page_response.status >= 400:
@@ -446,10 +502,11 @@ async def fetch_with_aiohttp(session: aiohttp.ClientSession, url: str, timeout: 
             "status_code": page_response.status,
             "response_headers": page_response.headers,
             "error": f"HTTP {page_response.status}",
+            "fetch_context": fetch_context,
             "metadata_schema_version": "site_profile/v1",
         }
 
-    soup = BeautifulSoup(page_response.html, "lxml")
+    soup = parse_response_soup(page_response.html, page_response.headers)
     page_signals = extract_page_signals(soup, page_response.url)
     homepage_url = f"{urlparse(page_response.url).scheme}://{urlparse(page_response.url).netloc}/"
     site_signals = {
@@ -468,7 +525,7 @@ async def fetch_with_aiohttp(session: aiohttp.ClientSession, url: str, timeout: 
         if "response" in homepage_fetch:
             homepage_response: SimpleResponse = homepage_fetch["response"]
             if homepage_response.status < 400:
-                homepage_soup = BeautifulSoup(homepage_response.html, "lxml")
+                homepage_soup = parse_response_soup(homepage_response.html, homepage_response.headers)
                 homepage_page_signals = extract_page_signals(homepage_soup, homepage_response.url)
                 site_signals["homepage_fetch_status"] = "success"
                 site_signals["homepage_source"] = "fetched"
@@ -509,6 +566,7 @@ async def fetch_with_aiohttp(session: aiohttp.ClientSession, url: str, timeout: 
         "fetch_status": "success",
         "status_code": page_response.status,
         "response_headers": page_response.headers,
+        "fetch_context": fetch_context,
         "page_signals": page_signals,
         "site_signals": site_signals,
         "site_profile": site_profile,
@@ -595,6 +653,7 @@ async def fetch_webpage_info_async(input_file: Path, output_file: Path, options:
     headers = {
         "User-Agent": options["user_agent"],
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Encoding": "gzip, deflate",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         "Cache-Control": "no-cache",
         "Pragma": "no-cache",
@@ -658,10 +717,14 @@ async def fetch_webpage_info_async(input_file: Path, output_file: Path, options:
     review_free_count = 0
     trusted_override_count = 0
     trusted_override_domains: Counter[str] = Counter()
+    route_counts: Counter[str] = Counter()
+    review_by_route: Counter[str] = Counter()
     for item in final_results:
         metadata = apply_review_policy(item.get("metadata", {}), item.get("domain", ""), review_policy)
         status = metadata.get("fetch_status")
         link_health = metadata.get("link_health", {})
+        route = (metadata.get("fetch_context", {}) or {}).get("route") or "unknown"
+        route_counts[route] += 1
         if status == "success":
             success_count += 1
         elif status == "broken":
@@ -670,11 +733,14 @@ async def fetch_webpage_info_async(input_file: Path, output_file: Path, options:
             failed_count += 1
         if not link_health.get("review_required", True):
             review_free_count += 1
+        else:
+            review_by_route[route] += 1
         if link_health.get("trusted_override"):
             trusted_override_count += 1
             trusted_override_domains[link_health.get("trusted_domain") or item.get("domain") or "未知域名"] += 1
 
     final_data = {
+        "schema_version": FETCH_OUTPUT_SCHEMA_VERSION,
         "bookmarks": final_results,
         "stats": {
             "total_bookmarks": total,
@@ -689,12 +755,66 @@ async def fetch_webpage_info_async(input_file: Path, output_file: Path, options:
             "proxy_trust_env": options["proxy"]["trust_env"],
             "trusted_override_count": trusted_override_count,
             "trusted_override_domains": dict(sorted(trusted_override_domains.items())),
+            "route_counts": dict(sorted(route_counts.items())),
+            "review_by_route": dict(sorted(review_by_route.items())),
             "metadata_schema_version": "site_profile/v1",
         },
     }
     ensure_parent(output_file)
     output_file.write_text(json.dumps(final_data, ensure_ascii=False, indent=2), encoding="utf-8")
     return final_data
+
+
+def build_pass_summary(label: str, result: dict) -> dict:
+    stats = result.get("stats", {})
+    return {
+        "name": label,
+        "success_count": stats.get("success_count", 0),
+        "broken_count": stats.get("broken_count", 0),
+        "fail_count": stats.get("fail_count", 0),
+        "review_free_count": stats.get("review_free_count", 0),
+        "reused_count": stats.get("reused_count", 0),
+        "retried_count": stats.get("retried_count", 0),
+        "trusted_override_count": stats.get("trusted_override_count", 0),
+        "route_counts": stats.get("route_counts", {}),
+        "review_by_route": stats.get("review_by_route", {}),
+    }
+
+
+def run_fetch_passes(input_file: Path, output_file: Path, options: dict, logger) -> dict:
+    primary_result = asyncio.run(fetch_webpage_info_async(input_file, output_file, options, logger))
+    if not options.get("direct_retry_after_proxy") or not fetch_route_configured(options.get("proxy", {})):
+        return primary_result
+
+    direct_retry_options = dict(options)
+    direct_retry_options["force_refetch"] = False
+    direct_retry_options["proxy"] = {
+        "enabled": False,
+        "trust_env": False,
+        "http_proxy": None,
+        "https_proxy": None,
+        "all_proxy": None,
+    }
+    logger.info("开始第二轮直连重试，复用第一轮抓取缓存")
+    final_result = asyncio.run(fetch_webpage_info_async(input_file, output_file, direct_retry_options, logger))
+    primary_stats = primary_result.get("stats", {})
+    final_stats = final_result.get("stats", {})
+    final_stats["multi_pass_mode"] = "proxy_then_direct_retry"
+    final_stats["proxy_enabled"] = primary_stats.get("proxy_enabled", final_stats.get("proxy_enabled", False))
+    final_stats["proxy_trust_env"] = primary_stats.get("proxy_trust_env", final_stats.get("proxy_trust_env", False))
+    final_stats["pass_summaries"] = [
+        build_pass_summary("proxy", primary_result),
+        build_pass_summary("direct_retry", final_result),
+    ]
+    final_stats["pass_deltas"] = {
+        "success_delta": final_stats.get("success_count", 0) - primary_stats.get("success_count", 0),
+        "broken_delta": final_stats.get("broken_count", 0) - primary_stats.get("broken_count", 0),
+        "fail_delta": final_stats.get("fail_count", 0) - primary_stats.get("fail_count", 0),
+        "review_free_delta": final_stats.get("review_free_count", 0) - primary_stats.get("review_free_count", 0),
+    }
+    ensure_parent(output_file)
+    output_file.write_text(json.dumps(final_result, ensure_ascii=False, indent=2), encoding="utf-8")
+    return final_result
 
 
 def main() -> int:
@@ -714,6 +834,7 @@ def main() -> int:
     parser.add_argument("--all-proxy", default=None, help="通用代理地址")
     parser.add_argument("--clear-cache", action="store_true", help="删除抓取缓存后重新开始")
     parser.add_argument("--force-refetch", action="store_true", help="忽略已有成功缓存并全量重抓")
+    parser.add_argument("--direct-retry-after-proxy", action="store_true", help="代理抓取后，对剩余异常书签自动去代理重试一次")
     args = parser.parse_args()
 
     config = load_config_from_args(args)
@@ -759,8 +880,9 @@ def main() -> int:
         proxy_options["all_proxy"] = args.all_proxy
         proxy_options["enabled"] = True
     options["proxy"] = proxy_options
+    options["direct_retry_after_proxy"] = bool(args.direct_retry_after_proxy)
 
-    result = asyncio.run(fetch_webpage_info_async(input_file, output_file, options, logger))
+    result = run_fetch_passes(input_file, output_file, options, logger)
     broken_links_count = export_broken_links_report(result["bookmarks"], broken_links_report_file, options.get("review_policy"))
     review_count = export_review_report(result["bookmarks"], review_report_file, options.get("review_policy"))
     print(f"✓ 网页信息获取完成: {output_file}")
@@ -774,6 +896,9 @@ def main() -> int:
     print(f"  待审阅异常: {review_count}")
     print(f"  待审阅报告: {review_report_file}")
     print(f"  失败: {result['stats']['fail_count']}")
+    if result["stats"].get("multi_pass_mode") == "proxy_then_direct_retry":
+        deltas = result["stats"].get("pass_deltas", {})
+        print(f"  双通路重试: 成功变化 {deltas.get('success_delta', 0)}, 免审阅变化 {deltas.get('review_free_delta', 0)}")
     return 0
 
 

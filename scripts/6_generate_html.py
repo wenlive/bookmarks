@@ -7,7 +7,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict
 
-from common import build_parser, configure_logging, ensure_parent, load_config_from_args
+from common import (
+    CLUSTERING_OUTPUT_SCHEMA_VERSION,
+    build_parser,
+    configure_logging,
+    ensure_parent,
+    load_config_from_args,
+    require_payload_schema,
+)
 
 
 class BookmarkHTMLGenerator:
@@ -121,7 +128,16 @@ def main() -> int:
         print(f"错误: 输入文件不存在: {input_file}")
         return 1
 
-    payload = json.loads(input_file.read_text(encoding="utf-8"))
+    try:
+        payload = require_payload_schema(
+            json.loads(input_file.read_text(encoding="utf-8")),
+            CLUSTERING_OUTPUT_SCHEMA_VERSION,
+            "步骤6输入",
+            input_file,
+        )
+    except ValueError as exc:
+        print(f"错误: {exc}")
+        return 1
     hierarchy = payload["hierarchy"]
     review_hierarchy = payload.get("review_hierarchy", {})
     generator = BookmarkHTMLGenerator()

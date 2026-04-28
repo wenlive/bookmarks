@@ -71,6 +71,8 @@ def build_metadata(title: str, description: str, keywords: str, h1: str, content
 
 
 def write_enriched_fixture(parsed_file: Path, output_file: Path) -> None:
+    from scripts_compat import common_module  # local import to avoid cycles in module loading
+
     data = json.loads(parsed_file.read_text(encoding='utf-8'))
     for bookmark in data['bookmarks']:
         if 'python' in bookmark['url']:
@@ -84,4 +86,15 @@ def write_enriched_fixture(parsed_file: Path, output_file: Path) -> None:
                 page_type_hints=['research'], site_name='OpenAI', brand_terms=['openai'],
             )
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    output_file.write_text(json.dumps({'bookmarks': data['bookmarks'], 'stats': {}}, ensure_ascii=False, indent=2), encoding='utf-8')
+    output_file.write_text(
+        json.dumps(
+            {
+                'schema_version': common_module.FETCH_OUTPUT_SCHEMA_VERSION,
+                'bookmarks': data['bookmarks'],
+                'stats': {},
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding='utf-8',
+    )

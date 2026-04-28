@@ -116,6 +116,7 @@ def test_signal_pack_uses_structured_page_signals_and_schema_facets():
 
     signal_pack = common_module.build_signal_pack(bookmark)
 
+    assert signal_pack["schema_version"] == common_module.SIGNAL_PACK_SCHEMA_VERSION
     assert signal_pack["preferred_title"] == "Saved API Note"
     assert "Clean OG Title" in signal_pack["title_candidates"]
     assert signal_pack["preferred_description"] == "user supplied context"
@@ -124,6 +125,9 @@ def test_signal_pack_uses_structured_page_signals_and_schema_facets():
     assert signal_pack["language"] == "en"
     assert signal_pack["time_bucket"]["year_month"] == "2023-11"
     assert "Clean OG Title" in signal_pack["semantic_text"]
+    assert signal_pack["content"]["keywords_text"] == ""
+    assert signal_pack["structure"]["site_name"] == "Example Docs"
+    assert "identity.canonical_identity" in common_module.flatten_signal_pack(signal_pack, include_empty=True)
 
 
 def test_copy_step_is_noop_for_same_file(tmp_path):
@@ -167,6 +171,37 @@ def test_classifier_outputs_multidimensional_labels_and_confirmation_report(tmp_
     exported = json.loads(report.read_text(encoding="utf-8"))
     assert exported["count"] == 1
     assert exported["bookmarks"][0]["primary_topics"][0] == "编程语言/Python"
+
+
+def test_classifier_ignores_fetch_operational_terms_in_cluster_hints():
+    rules_file = ROOT / "data" / "category_rules.json"
+    classifier = classify_module.BookmarkClassifier(rules_file, {"confirm_threshold": 90, "title_weight": 50})
+    metadata = build_metadata(
+        "Mini-LSM Overview",
+        "LSM-tree implementation notes",
+        "lsm,storage",
+        "Mini-LSM",
+        "LSM storage internals",
+        page_type_hints=["documentation"],
+        site_name="Mini-LSM",
+        brand_terms=["Mini", "LSM"],
+    )
+    metadata["site_signals"]["homepage_fetch_status"] = "success"
+    metadata["site_signals"]["homepage_source"] = "fetched"
+    bookmark = {
+        "id": "bookmark_fetch_terms",
+        "name": "Mini-LSM Overview",
+        "url": "https://example.com/mini-lsm/overview",
+        "domain": "example.com",
+        "original_folder_path": ["数据库"],
+        "metadata": metadata,
+    }
+
+    classification = classifier.classify_bookmark(bookmark)
+
+    normalized_hints = {hint.lower() for hint in classification["cluster_hints"]}
+    assert "success" not in normalized_hints
+    assert "fetched" not in normalized_hints
 
 
 def test_cluster_and_generate_html():
@@ -255,6 +290,13 @@ def test_fetch_normalize_metadata_classifies_review_categories():
         }
     )
     assert dns_md["link_health"]["reason_label"] == "DNS/连接失败"
+
+
+def test_parse_response_soup_uses_xml_parser_for_xml_content():
+    xml = """<?xml version="1.0" encoding="utf-8"?><feed><title>XML Feed</title><entry><title>Item</title></entry></feed>"""
+    soup = fetch_module.parse_response_soup(xml, {"content-type": "application/xml; charset=utf-8"})
+    assert soup.find("feed") is not None
+    assert soup.find("entry").find("title").get_text(strip=True) == "Item"
 
     broken_md = fetch_module.normalize_metadata({"fetch_status": "broken", "status_code": 404, "error": "HTTP 404"})
     assert broken_md["link_health"]["reason_label"] == "HTTP 4xx/5xx"
@@ -397,6 +439,69 @@ def test_fetch_step_reuses_successful_cache_and_retries_failures(tmp_path):
     assert result["stats"]["retried_count"] == 1
     assert result["bookmarks"][0]["metadata"]["title"] == "Cached"
     assert result["bookmarks"][1]["metadata"]["title"] == "Fetched"
+
+
+def test_run_fetch_passes_retries_without_proxy_when_requested(tmp_path):
+    input_file = tmp_path / "parsed.json"
+    output_file = tmp_path / "enriched.json"
+    input_file.write_text(json.dumps({"bookmarks": []}, ensure_ascii=False), encoding="utf-8")
+    calls: list[str] = []
+
+    async def fake_fetch(input_path, output_path, options, logger):
+        route = "proxy" if fetch_module.fetch_route_configured(options.get("proxy", {})) else "direct"
+        calls.append(route)
+        return {
+            "bookmarks": [],
+            "stats": {
+                "total_bookmarks": 0,
+                "success_count": 1 if route == "proxy" else 2,
+                "broken_count": 0,
+                "fail_count": 0,
+                "review_free_count": 1 if route == "proxy" else 2,
+                "reused_count": 0 if route == "proxy" else 1,
+                "retried_count": 1 if route == "proxy" else 0,
+                "trusted_override_count": 0,
+                "proxy_enabled": route == "proxy",
+                "proxy_trust_env": route == "proxy",
+                "route_counts": {route: 1},
+                "review_by_route": {},
+            },
+        }
+
+    original = fetch_module.fetch_webpage_info_async
+    fetch_module.fetch_webpage_info_async = fake_fetch
+    try:
+        result = fetch_module.run_fetch_passes(
+            input_file,
+            output_file,
+            {
+                "concurrent_limit": 1,
+                "timeout": 1,
+                "delay": 0,
+                "batch_size": 1,
+                "max_retries": 0,
+                "force_refetch": False,
+                "user_agent": "pytest",
+                "direct_retry_after_proxy": True,
+                "proxy": {
+                    "enabled": True,
+                    "trust_env": True,
+                    "http_proxy": None,
+                    "https_proxy": None,
+                    "all_proxy": None,
+                },
+            },
+            common_module.configure_logging(common_module.PipelineConfig.load(ROOT / "skill_config.json"), "INFO"),
+        )
+    finally:
+        fetch_module.fetch_webpage_info_async = original
+
+    assert calls == ["proxy", "direct"]
+    assert result["stats"]["multi_pass_mode"] == "proxy_then_direct_retry"
+    assert result["stats"]["proxy_enabled"] is True
+    assert result["stats"]["proxy_trust_env"] is True
+    assert result["stats"]["pass_deltas"]["success_delta"] == 1
+    assert [item["name"] for item in result["stats"]["pass_summaries"]] == ["proxy", "direct_retry"]
 
 
 def test_fetch_step_reuses_trusted_cached_result_without_retry(tmp_path):
@@ -753,6 +858,79 @@ def test_generic_platform_domain_does_not_force_unrelated_repos_into_one_cluster
     assert all(len({bookmark["classification"]["category"] for bookmark in cluster}) == 1 for cluster in clusters)
 
 
+def test_clusterer_splits_large_high_confidence_mixed_categories():
+    clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2)
+    bookmarks = [
+        _bookmark(index, name=f"openGauss 文档 {index}", url=f"https://docs.opengauss.org/zh/docs/latest/doc{index}.html", domain="docs.opengauss.org", category="数据库/openGauss", folder=["数据库", "openGauss"], description="opengauss database documentation")
+        for index in range(1, 4)
+    ] + [
+        _bookmark(index + 10, name=f"PostgreSQL 文档 {index}", url=f"https://www.postgresql.org/docs/current/doc{index}.html", domain="www.postgresql.org", category="数据库/PostgreSQL", folder=["数据库", "PostgreSQL"], description="postgresql database documentation")
+        for index in range(1, 4)
+    ]
+    for bookmark in bookmarks:
+        category = bookmark["classification"]["category"]
+        bookmark["classification"].update(
+            {
+                "display_category": category,
+                "cluster_hints": ["文档中心", "数据库"],
+                "open_topic_candidates": [{"topic": category.split("/")[-1], "score": 8, "sources": ["title"]}],
+                "rule_roots": [{"root": "数据库", "support": 1.0, "total": 90.0}],
+                "rule_confidence": 0.92,
+            }
+        )
+
+    clusterer._connected_components = lambda bookmarks, features, threshold=0.34: [bookmarks]
+    clusterer._split_if_needed = lambda clusters: clusters
+    clusterer._merge_if_needed = lambda clusters: clusters
+
+    clusters = clusterer.cluster_bookmarks(bookmarks)
+
+    assert sorted(len(cluster) for cluster in clusters) == [3, 3]
+    assert all(len({bookmark["classification"]["category"] for bookmark in cluster}) == 1 for cluster in clusters)
+
+
+def test_fetch_blocked_clusters_stay_in_tidy_and_suggest_fetch_investigation():
+    clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2)
+    bookmarks = [
+        _bookmark(index, name=f"TiDB 问题导图 {index}", url=f"https://docs.pingcap.com/tidb/stable/troubleshoot-{index}", domain="docs.pingcap.com", category="待整理", folder=["数据库", "TiDB"], description="tidb pingcap docs")
+        for index in range(1, 5)
+    ]
+    for bookmark in bookmarks:
+        bookmark["metadata"]["fetch_status"] = "error"
+        bookmark["classification"].update(
+            {
+                "display_category": "待整理",
+                "cluster_hints": ["TiDB", "Pingcap"],
+                "open_topic_candidates": [{"topic": "Pingcap", "score": 6, "sources": ["title"]}],
+                "rule_roots": [{"root": "数据库", "support": 1.0, "total": 24.0}],
+                "rule_confidence": 0.4,
+                "confirmation_bucket": "fetch_blocked",
+                "review_required": True,
+            }
+        )
+
+    clusterer._connected_components = lambda bookmarks, features, threshold=0.34: [bookmarks]
+    clusterer._split_if_needed = lambda clusters: clusters
+    clusterer._merge_if_needed = lambda clusters: clusters
+
+    profiles = cluster_module.build_cluster_payloads(
+        clusterer,
+        bookmarks,
+        threshold=20,
+        discovery_root_name="发现主题",
+        tidy_root_name="待整理",
+    )
+    suggestions = cluster_module.generate_rule_suggestions(
+        profiles,
+        discovery_root_name="发现主题",
+        tidy_root_name="待整理",
+    )
+
+    assert profiles[0]["destination_root"] == "待整理"
+    assert profiles[0]["fetch_blocked_share"] == 1.0
+    assert suggestions["suggestions"][0]["type"] == "investigate_fetch_failures"
+
+
 def test_generate_rule_suggestions_reports_low_purity_clusters():
     bookmarks = [
         {"id": f"bookmark_{index}", "name": f"FastAPI {index}", "url": f"https://example.com/{index}", "domain": "example.com", "classification": {"category": "其他/未分类"}}
@@ -1034,6 +1212,7 @@ def test_cli_respects_config_and_creates_outputs(tmp_path):
     assert (tmp_path / "runtime" / "output" / "reports" / "duplicates.json").exists()
     assert (tmp_path / "runtime" / "output" / "reports" / "rule_suggestions.json").exists()
     assert (tmp_path / "runtime" / "output" / "reports" / "quality_report.json").exists()
+    assert (tmp_path / "runtime" / "output" / "reports" / "signal_audit.json").exists()
     assert (tmp_path / "runtime" / "logs" / "app.log").exists()
 
 
@@ -1272,6 +1451,8 @@ def test_classifier_exports_open_topic_only_bookmarks_for_confirmation(tmp_path)
     assert exported["count"] == 1
     assert exported["bookmarks"][0]["id"] == "bookmark_open_topic"
     assert exported["bookmarks"][0]["primary_topics"] == []
+    assert exported["bookmarks"][0]["confirmation_bucket"] == "rule_gap"
+    assert "rule_coverage_gap_on_successful_fetch" in exported["bookmarks"][0]["needs_confirmation_reasons"]
 
 
 def test_classifier_treats_folder_as_weak_prior_and_reports_low_confidence():
@@ -1332,8 +1513,8 @@ def test_classifier_ignores_stale_chrome_folder_for_topic_assignment():
     chrome_classification = classifier.classify_bookmark(chrome_extension)
     go_classification = classifier.classify_bookmark(stackoverflow_go)
 
-    assert chrome_classification["category"] == "待整理"
-    assert not chrome_classification["primary_topics"]
+    assert chrome_classification["category"] == "开发工具/Chrome扩展"
+    assert "数据库/TiDB" not in chrome_classification["primary_topics"]
     assert go_classification["category"] == "待整理"
     assert "数据库/TiDB" not in go_classification["primary_topics"]
     assert go_classification["folder_alignment_score"] == 0.0
@@ -1367,6 +1548,36 @@ def test_classifier_suppresses_generic_platform_open_topics():
     assert all("github" not in hint.lower() for hint in classification["cluster_hints"])
 
 
+def test_classifier_suppresses_source_like_generic_doc_tokens():
+    rules_file = ROOT / "data" / "category_rules.json"
+    classifier = classify_module.BookmarkClassifier(rules_file)
+    bookmark = {
+        "id": "bookmark_docs_qq",
+        "name": "多机集群部署方式说明",
+        "url": "https://docs.qq.com/doc/example",
+        "domain": "docs.qq.com",
+        "original_folder_path": ["资料"],
+        "metadata": {
+            "title": "多机集群部署方式说明",
+            "description": "腾讯文档，支持多人在线编辑 Word、Excel 和 PPT 文档",
+            "site_profile": {
+                "site": {
+                    "site_name": "腾讯文档",
+                    "brand_terms": ["在线文档", "Excel", "Word"],
+                },
+                "page": {"og:title": "多机集群部署方式说明"},
+            },
+        },
+    }
+
+    classification = classifier.classify_bookmark(bookmark)
+
+    open_topics = {candidate["topic"].lower() for candidate in classification["open_topic_candidates"]}
+    assert "excel" not in open_topics
+    assert "word" not in open_topics
+    assert "腾讯文档" not in classification["cluster_hints"]
+
+
 def test_classifier_caps_untrusted_fetch_failures_to_tidy():
     rules_file = ROOT / "data" / "category_rules.json"
     classifier = classify_module.BookmarkClassifier(rules_file)
@@ -1394,9 +1605,90 @@ def test_classifier_caps_untrusted_fetch_failures_to_tidy():
 
     assert classification["category"] == "待整理"
     assert classification["review_required"] is True
+    assert classification["confirmation_bucket"] == "fetch_blocked"
     assert classification["rule_confidence"] <= 0.45
     assert "待审阅" in classification["quality_signals"]
     assert any(item["category"] == "数据库/TiDB" for item in classification["rule_candidates"])
+
+
+def test_classifier_rules_cover_product_specific_database_families():
+    rules_file = ROOT / "data" / "category_rules.json"
+    classifier = classify_module.BookmarkClassifier(rules_file)
+
+    opengauss = classifier.classify_bookmark(
+        {
+            "id": "bookmark_opengauss",
+            "name": "openGauss 文档中心",
+            "url": "https://docs.opengauss.org/zh/docs/latest/docs/Developerguide/index.html",
+            "domain": "docs.opengauss.org",
+            "original_folder_path": ["数据库"],
+            "metadata": build_metadata("openGauss 文档中心", "openGauss developer guide", "opengauss", "openGauss", "openGauss docs"),
+        }
+    )
+    duckdb = classifier.classify_bookmark(
+        {
+            "id": "bookmark_duckdb",
+            "name": "DuckDB Python API",
+            "url": "https://duckdb.org/docs/stable/clients/python/overview.html",
+            "domain": "duckdb.org",
+            "original_folder_path": ["数据库"],
+            "metadata": build_metadata("DuckDB Python API", "duckdb client docs", "duckdb,python", "DuckDB", "duckdb docs"),
+        }
+    )
+    benchmarksql = classifier.classify_bookmark(
+        {
+            "id": "bookmark_benchmarksql",
+            "name": "TPCC测试 ｜ BenchmarkSQL",
+            "url": "https://benchmarksql.readthedocs.io/en/latest/",
+            "domain": "benchmarksql.readthedocs.io",
+            "original_folder_path": ["数据库"],
+            "metadata": build_metadata("BenchmarkSQL Documentation", "TPC-C benchmark driver", "benchmarksql,tpc-c", "BenchmarkSQL", "benchmarksql docs"),
+        }
+    )
+    influxdb = classifier.classify_bookmark(
+        {
+            "id": "bookmark_influxdb",
+            "name": "InfluxDB line protocol reference",
+            "url": "https://docs.influxdata.com/influxdb/v2/reference/syntax/line-protocol/",
+            "domain": "docs.influxdata.com",
+            "original_folder_path": ["数据库"],
+            "metadata": build_metadata("InfluxDB line protocol reference", "influxdb docs", "influxdb,line protocol", "InfluxDB", "influxdb docs"),
+        }
+    )
+
+    assert opengauss["category"] == "数据库/openGauss"
+    assert duckdb["category"] == "数据库/DuckDB"
+    assert benchmarksql["category"] == "数据库/BenchmarkSQL"
+    assert influxdb["category"] == "数据库/InfluxDB"
+
+
+def test_classifier_rules_cover_operational_tool_families():
+    rules_file = ROOT / "data" / "category_rules.json"
+    classifier = classify_module.BookmarkClassifier(rules_file)
+
+    ansible = classifier.classify_bookmark(
+        {
+            "id": "bookmark_ansible",
+            "name": "Ansible 中文权威指南",
+            "url": "https://www.ansible.com.cn/",
+            "domain": "www.ansible.com.cn",
+            "original_folder_path": ["运维"],
+            "metadata": build_metadata("Ansible 中文权威指南", "automation and playbooks", "ansible,playbook,inventory", "Ansible", "ansible docs"),
+        }
+    )
+    chrome_extension = classifier.classify_bookmark(
+        {
+            "id": "bookmark_chrome_extension",
+            "name": "迁移到 Manifest V3",
+            "url": "https://developer.chrome.com/docs/extensions/develop/migrate/what-is-mv3",
+            "domain": "developer.chrome.com",
+            "original_folder_path": ["开发"],
+            "metadata": build_metadata("Chrome Extensions | Manifest V3", "chrome extension migration guide", "chrome extensions,manifest v3", "Chrome for Developers", "chrome extension docs"),
+        }
+    )
+
+    assert ansible["category"] == "DevOps/Ansible"
+    assert chrome_extension["category"] == "开发工具/Chrome扩展"
 
 
 def test_classifier_uses_general_reading_topic_without_personal_rules():
@@ -1495,6 +1787,7 @@ def test_quality_report_tracks_folder_and_generic_domain_metrics():
     assert report["metrics"]["low_confidence_normal_category_count"] == 0
     assert report["metrics"]["generic_platform_domain_suggestion_count"] == 0
     assert report["metrics"]["tidy_cluster_count"] == 1
+    assert report["metrics"]["flat_normal_root_count"] == 0
     platform_report = cluster_module.generate_quality_report(
         bookmarks,
         [
@@ -1517,6 +1810,88 @@ def test_quality_report_tracks_folder_and_generic_domain_metrics():
     assert platform_report["metrics"]["generic_platform_cluster_count"] == 1
     assert platform_report["metrics"]["largest_generic_platform_cluster_size"] == 5
     assert platform_report["largest_generic_platform_clusters"][0]["generic_platform_share"] == 1.0
+
+
+def test_signal_audit_tracks_collection_and_usage():
+    clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2)
+    bookmark = _bookmark(
+        1,
+        name="DuckDB Docs",
+        url="https://duckdb.org/docs/stable/sql/introduction",
+        domain="duckdb.org",
+        category="数据库/DuckDB",
+        folder=["数据库", "DuckDB"],
+        description="duckdb sql documentation",
+        keywords="duckdb,sql,docs",
+    )
+    bookmark["signal_pack"] = common_module.build_signal_pack(bookmark)
+    bookmark["classification"] = {
+        "category": "数据库/DuckDB",
+        "rule_confidence": 0.91,
+        "resource_type": "文档",
+        "quality_signals": ["官方"],
+        "used_signal_families": ["identity", "content", "structure"],
+        "used_signal_fields": [
+            "identity.domain",
+            "content.title_candidates",
+            "content.semantic_text",
+            "structure.resource_facets",
+        ],
+        "cluster_hints": ["DuckDB"],
+        "rule_roots": [{"root": "数据库", "support": 1.0, "total": 90.0}],
+        "all_scores": {"数据库/DuckDB": {"total": 90.0}},
+    }
+
+    audit = cluster_module.generate_signal_audit([bookmark], clusterer)
+
+    assert audit["schema_version"] == common_module.SIGNAL_AUDIT_SCHEMA_VERSION
+    assert audit["summary"]["collected_field_count"] >= 10
+    assert any(item["field"] == "identity.domain" for item in audit["fields"])
+    assert any(item["family"] == "content" for item in audit["families"])
+
+
+def test_require_payload_schema_rejects_stale_stage_outputs(tmp_path):
+    stale_fetch = tmp_path / "stale_enriched.json"
+    stale_fetch.write_text(json.dumps({"bookmarks": [], "stats": {}}, ensure_ascii=False), encoding="utf-8")
+
+    result = subprocess.run(
+        ["python3", "scripts/4_classify_bookmarks.py", "--input", str(stale_fetch), "--output", str(tmp_path / "classified.json")],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "schema_version" in result.stdout
+
+
+def test_compact_hierarchy_payload_keeps_html_generation_fields():
+    payload = {
+        "name": "数据库",
+        "category": "数据库",
+        "bookmarks": [
+            {
+                "id": "bookmark_1",
+                "name": "DuckDB Docs",
+                "url": "https://duckdb.org/docs",
+                "domain": "duckdb.org",
+                "metadata": {"title": "large payload"},
+                "classification": {
+                    "category": "数据库/DuckDB",
+                    "resource_type": "文档",
+                    "review_required": False,
+                },
+            }
+        ],
+        "subcategories": {},
+        "count": 1,
+    }
+
+    compact = cluster_module.compact_hierarchy_payload(payload)
+
+    assert compact["bookmarks"][0]["name"] == "DuckDB Docs"
+    assert compact["bookmarks"][0]["classification"]["category"] == "数据库/DuckDB"
+    assert "metadata" not in compact["bookmarks"][0]
 
 
 def test_topic_collection_is_deterministic_for_same_inputs():
@@ -1562,13 +1937,15 @@ def test_build_root_hierarchy_preserves_leaf_categories_without_suffix_spam():
     assert database["category"] == "数据库"
     assert programming["count"] == 2
     assert database["count"] == 2
-    assert len(programming["bookmarks"]) == 2
-    assert len(database["bookmarks"]) == 2
+    assert set(programming["subcategories"]) == {"Python", "Rust"}
+    assert set(database["subcategories"]) == {"PostgreSQL"}
+    assert len(programming["bookmarks"]) == 0
+    assert len(database["bookmarks"]) == 0
     assert all(not name.endswith(")") for name in programming.get("subcategories", {}))
     assert all(not name.endswith(")") for name in database.get("subcategories", {}))
 
 
-def test_build_root_hierarchy_uses_threshold_to_inline_small_pure_clusters():
+def test_build_root_hierarchy_keeps_small_pure_clusters_browsable():
     clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2)
     bookmarks = [
         _bookmark(1, name="PostgreSQL Docs", url="https://postgresql.org/docs", domain="postgresql.org", category="数据库/PostgreSQL", folder=["学习", "PostgreSQL"]),
@@ -1579,8 +1956,8 @@ def test_build_root_hierarchy_uses_threshold_to_inline_small_pure_clusters():
     high_threshold = cluster_module.build_root_hierarchy(clusterer, bookmarks, threshold=20)
 
     assert set(low_threshold["数据库"]["subcategories"]) == {"PostgreSQL"}
-    assert high_threshold["数据库"]["subcategories"] == {}
-    assert len(high_threshold["数据库"]["bookmarks"]) == 2
+    assert set(high_threshold["数据库"]["subcategories"]) == {"PostgreSQL"}
+    assert len(high_threshold["数据库"]["bookmarks"]) == 0
 
 
 def test_build_display_hierarchy_groups_top_level_roots_for_human_browsing():
@@ -1602,8 +1979,8 @@ def test_build_display_hierarchy_groups_top_level_roots_for_human_browsing():
 
     assert list(display_hierarchy) == ["技术主题"]
     assert set(display_hierarchy["技术主题"]["subcategories"]) == {"数据库", "编程语言"}
-    assert len(display_hierarchy["技术主题"]["subcategories"]["数据库"]["bookmarks"]) == 2
-    assert len(display_hierarchy["技术主题"]["subcategories"]["编程语言"]["bookmarks"]) == 2
+    assert "PostgreSQL" in display_hierarchy["技术主题"]["subcategories"]["数据库"]["subcategories"]
+    assert "Python" in display_hierarchy["技术主题"]["subcategories"]["编程语言"]["subcategories"]
 
     html = html_module.BookmarkHTMLGenerator().generate_html(display_hierarchy)
     assert html.find("数据库") < html.find("编程语言")

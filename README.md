@@ -9,23 +9,33 @@ description: Use this project to turn exported Chrome bookmarks into classified,
 
 This repository is a local, configuration-driven pipeline for reorganizing exported Chrome bookmarks.
 
-It is optimized for practical output quality rather than perfect taxonomy. The pipeline keeps uncertain items visible, avoids over-trusting stale Chrome folders, separates generic publishing platforms from real topics, and emits reports that help future rule improvements.
+It is optimized for practical output quality rather than perfect taxonomy. The pipeline keeps uncertainty visible, avoids over-trusting stale Chrome folders, treats generic publishing platforms as source signals rather than topics, and emits reports that drive the next round of rule or clustering improvements.
+
+## Current State
+
+The codebase is already on the information-flow version of the pipeline:
+
+- `signal_pack/v2` is the shared contract between fetch, classify, and cluster.
+- stage outputs carry explicit `schema_version` and downstream stages reject stale inputs.
+- classification and clustering both emit decision evidence.
+- `signal_audit.json` tracks which collected signals are actually consumed.
+
+Latest real-input validation is documented in `TODO_RUNTIME_FOLLOWUP.md`. As of `2026-04-28`, the pipeline has been validated on a real `1012`-bookmark export and is operational on real data.
 
 ## Use This When
 
 - You have a Chrome-exported `bookmarks.html` file and want a cleaner importable HTML file.
 - You want technical bookmarks grouped by topic, resource type, and discovered themes.
-- You need failed or suspicious links preserved but mirrored into a review queue.
-- You want reports that identify weak rules, mixed clusters, and topics worth adding.
-- You are an agent improving this project and need the current mental model, entrypoints, and quality gates.
+- You want broken or suspicious links preserved but mirrored into `待审阅`.
+- You want reports that identify fetch hotspots, rule gaps, mixed clusters, and unused signals.
+- You are an agent improving this project and need the current design contract before making changes.
 
 ## Do Not Assume
 
-- Do not assume the original Chrome folder path is correct. It is context only, not strong topic evidence.
-- Do not add broad platform domains such as `github.com`, `csdn.net`, `zhihu.com`, or `medium.com` to topic rules. These are generic platforms.
-- Do not delete broken links automatically. The pipeline preserves them and mirrors them into `待审阅`.
-- Do not treat a higher count in generated HTML as duplication by itself. Review links are intentionally mirrored.
-- Do not edit generated files in `data/*.json`, `output/`, or `logs/` as source of truth.
+- Original Chrome folder path is context only, not strong topic evidence.
+- Generic platform domains such as `github.com`, `csdn.net`, `zhihu.com`, `jianshu.com`, `docs.qq.com`, or `medium.com` are not topic domains.
+- More bookmarks in generated HTML does not imply duplication. `待审阅` is an intentional mirror.
+- Generated files in `data/*.json`, `output/`, and `logs/` are not source of truth.
 
 ## Primary Command
 
@@ -33,17 +43,17 @@ It is optimized for practical output quality rather than perfect taxonomy. The p
 ./organize.sh data/bookmarks.html skill_config.json
 ```
 
-If the network needs a proxy:
+Preferred real-network run when a proxy is required:
 
 ```bash
 export https_proxy=http://127.0.0.1:7897
 export http_proxy=http://127.0.0.1:7897
 export all_proxy=socks5://127.0.0.1:7897
 
-./organize.sh data/bookmarks.html skill_config.json --use-proxy --trust-env
+./organize.sh data/bookmarks.html skill_config.json --use-proxy --trust-env --direct-retry-after-proxy
 ```
 
-The final importable file is:
+Final importable output:
 
 ```text
 output/organized_bookmarks.html
@@ -71,49 +81,86 @@ Each step reads configuration from `skill_config.json` unless overridden with CL
 | Step | Script | Main input | Main output | Role |
 | --- | --- | --- | --- | --- |
 | 1 | `scripts/1_copy_bookmark.py` | source HTML | `data/bookmarks.html` | Copy source into project path |
-| 2 | `scripts/2_parse_bookmarks.py` | copied HTML | `data/parsed_bookmarks.json` | Parse Chrome bookmark HTML and duplicates |
-| 3 | `scripts/3_fetch_webpage_info.py` | parsed JSON | `data/bookmarks_with_info.json` | Fetch metadata, page signals, review health |
-| 4 | `scripts/4_classify_bookmarks.py` | enriched JSON | `data/classified_bookmarks.json` | Build `signal_pack`, score topic/rules/facets |
-| 5 | `scripts/5_cluster_bookmarks.py` | classified JSON | `data/clustering_result.json` | Soft cluster, build hierarchy, quality reports |
+| 2 | `scripts/2_parse_bookmarks.py` | copied HTML | `data/parsed_bookmarks.json` | Parse Chrome bookmark HTML and detect duplicate URLs |
+| 3 | `scripts/3_fetch_webpage_info.py` | parsed JSON | `data/bookmarks_with_info.json` | Fetch page/site metadata, link health, fetch provenance |
+| 4 | `scripts/4_classify_bookmarks.py` | enriched JSON | `data/classified_bookmarks.json` | Build `signal_pack/v2`, score categories, infer resource type, emit confirmation evidence |
+| 5 | `scripts/5_cluster_bookmarks.py` | classified JSON | `data/clustering_result.json` | Build feature sets, cluster hierarchy, quality and rule reports |
 | 6 | `scripts/6_generate_html.py` | clustering JSON | `output/organized_bookmarks.html` | Emit Chrome import HTML |
 
-## Data Model
+## Stage Schemas
 
-The current design centers on `signal_pack`, built in `scripts/common.py`.
+Current stage contracts:
 
-Important signals:
+- fetch output: `fetch_output/v2`
+- classified output: `classified_output/v2`
+- clustering output: `clustering_output/v2`
+- signal audit report: `signal_audit/v1`
+- shared signal contract: `signal_pack/v2`
 
-- `preferred_title`: saved bookmark title first, then page metadata.
-- `title_candidates`: saved title, OG/Twitter title, `h1`, HTML title.
-- `preferred_description`: user description/notes, OG/Twitter description, meta description, main text.
-- `semantic_text`: consolidated text for classification and clustering.
-- `resource_facets`: structured hints such as `文档`, `博客`, `论文`, `仓库`, `工具`.
-- `source_facets`: site name, registrable domain, brand terms.
-- `quality_facets`: fetch success, review requirement, trusted-access state.
-- `canonical_identity`: canonical URL or normalized fetch URL.
-- `time_bucket`: year/month/week derived from Chrome `ADD_DATE`.
+If step 4, 5, or 6 sees an older stage payload, it fails fast instead of silently consuming stale JSON.
+
+## Shared Signal Model
+
+The current design centers on `signal_pack/v2`, built in `scripts/common.py`.
+
+Grouped signal families:
+
+- `identity`
+- `content`
+- `structure`
+- `health_access`
+- `context_time`
+
+Important shared fields:
+
+- `identity.canonical_identity`
+- `identity.domain`
+- `identity.registrable_domain`
+- `identity.path_segments`
+- `content.preferred_title`
+- `content.preferred_description`
+- `content.semantic_text`
+- `content.keywords_text`
+- `content.language`
+- `structure.resource_facets`
+- `structure.site_name`
+- `structure.brand_terms`
+- `structure.page_type_hints`
+- `structure.schema_types`
+- `health_access.fetch_status`
+- `health_access.link_health`
+- `health_access.fetch_context`
+- `health_access.quality_facets`
+- `context_time.time_bucket`
+
+This contract is the preferred place to add reusable signals. Do not duplicate fetch-derived extraction logic across classifier and clusterer if it can live in `signal_pack`.
 
 ## Classification Intent
 
 The classifier should prefer reliable evidence:
 
-- Strong: exact/suffix domain rules, title patterns, meaningful keyword/content hits.
-- Medium: metadata, OpenGraph/Twitter fields, schema/page type, main text.
-- Weak: dynamic topic candidates and generic discovered tokens.
-- Disabled for topic scoring: stale Chrome folder names.
+- strong: exact/suffix domain rules, title patterns, meaningful keyword/content hits
+- medium: page metadata, schema/page-type hints, main text, site name and brand terms
+- weak: dynamic topic candidates and discovered tokens
+- disabled for topic scoring: stale Chrome folder names
 
-Low-confidence items should go to `待整理`, not a normal topic. Useful emerging themes should surface under `发现主题`.
+Important invariants:
+
+- low-confidence normal assignments must be downgraded to `待整理`
+- folder-only normal assignments should remain `0`
+- fetch-caused uncertainty and rule-caused uncertainty should remain distinguishable
 
 ## Clustering Intent
 
 The clusterer builds soft topic groups without letting source platforms dominate.
 
-Key constraints:
+Important constraints:
 
-- Generic platforms are source signals, not topic roots.
-- `GitHub`, `CSDN`, `Zhihu`, `StackOverflow`, `Medium`, `docs.qq.com`, and similar domains must not merge unrelated content by domain alone.
-- `rule_roots` can guide destination only when enough normal-category support and confidence exist.
-- Mixed or weak clusters should land in `发现主题` or `待整理`, where reports can guide future rules.
+- generic platforms are source signals, not topic roots
+- source platforms should not over-merge unrelated technical topics
+- `发现主题` should contain plausible emerging topics, not obvious fetch-failure or platform-noise clusters
+- `待整理` should remain a conservative bucket for weak or unsupported clusters
+- `待审阅` is a review mirror, not duplicate output
 
 ## Outputs
 
@@ -129,6 +176,7 @@ Reports:
 - `output/reports/review_queue.json`
 - `output/reports/rule_suggestions.json`
 - `output/reports/quality_report.json`
+- `output/reports/signal_audit.json`
 
 Logs:
 
@@ -136,11 +184,15 @@ Logs:
 
 ## Output Semantics
 
-The final HTML is directly importable into Chrome.
+Generated HTML is directly importable into Chrome.
 
-Broken or suspicious links are not removed. They remain in the normal hierarchy and are also mirrored into top-level `待审阅`. Therefore the generated HTML bookmark count may be greater than the original input count.
+Broken or suspicious links are not deleted. They remain in the normal hierarchy and are also mirrored into top-level `待审阅` when `review_hierarchy` is non-empty. Therefore:
 
-Default top-level display groups:
+```text
+generated HTML bookmark count >= original input bookmark count
+```
+
+Default top-level groups:
 
 ```text
 技术主题
@@ -149,7 +201,7 @@ Default top-level display groups:
 个人与生活
 待整理
 发现主题
-待审阅
+待审阅  # only when review items exist
 ```
 
 ## Configuration
@@ -158,27 +210,27 @@ Use `skill_config.json` as the operational config.
 
 Core sections:
 
-- `input`: source bookmark path and rule files.
-- `pipeline`: intermediate file paths.
-- `output`: final HTML and report paths.
-- `fetch_options`: concurrency, timeout, retry, cache, proxy, trusted-access policy.
-- `classification_options`: scoring weights and confidence thresholds.
-- `clustering_options`: cluster thresholds, generic platforms, display groups.
-- `logging`: log level and log file.
+- `input`: source bookmark path and rule files
+- `pipeline`: intermediate file paths
+- `output`: final HTML and report paths
+- `fetch_options`: concurrency, timeout, retry, cache, proxy, trusted-access policy
+- `classification_options`: scoring weights and confidence thresholds
+- `clustering_options`: cluster thresholds, generic platforms, display groups
+- `logging`: log level and log file
 
 When using an alternate config file, relative paths are resolved relative to that config file's directory.
 
 ## Rule Files
 
-- `data/category_rules.json`: default shared rules.
-- `data/category_rules_overrides.json`: personal or local extensions.
+- `data/category_rules.json`: shared default rules
+- `data/category_rules_overrides.json`: local or personal extensions
 
 Rule improvement guidance:
 
-- Add specific product/project domains only when the domain is topic-specific.
-- Add aliases/keywords when a stable theme appears in `rule_suggestions.json`.
-- Add personal overrides in `data/category_rules_overrides.json` instead of rewriting broad defaults when possible.
-- Keep generic platform domains in `generic_platform_domains`, not in topic rules.
+- add topic-specific domains only when the domain itself is topic-specific
+- prefer aliases, title patterns, and stable project/product tokens before broad domain rules
+- keep generic platform domains in `generic_platform_domains`, not in topic rules
+- validate rule additions with `rule_suggestions.json`, `quality_report.json`, and tests
 
 ## Run Modes
 
@@ -188,10 +240,10 @@ Normal run:
 ./organize.sh data/bookmarks.html skill_config.json
 ```
 
-Retry failed fetches with proxy:
+Preferred fetch strategy when proxy is needed:
 
 ```bash
-./organize.sh data/bookmarks.html skill_config.json --use-proxy --trust-env
+./organize.sh data/bookmarks.html skill_config.json --use-proxy --trust-env --direct-retry-after-proxy
 ```
 
 Force full refetch:
@@ -223,18 +275,26 @@ pytest -q
 git diff --check
 ```
 
-After a real run, inspect `output/reports/quality_report.json`.
+After a real run, inspect:
+
+- `output/reports/quality_report.json`
+- `output/reports/rule_suggestions.json`
+- `output/reports/signal_audit.json`
+- `output/reports/review_queue.json`
 
 Important metrics:
 
-- `folder_only_classification_count` should stay `0`.
-- `low_confidence_normal_category_count` should stay `0`.
-- `generic_platform_domain_suggestion_count` should stay `0`.
-- `largest_generic_platform_cluster_size` should not grow unexpectedly.
+- `folder_only_classification_count == 0`
+- `low_confidence_normal_category_count == 0`
+- `generic_platform_domain_suggestion_count == 0`
+- `fetch_blocked_discovery_cluster_count == 0`
+- `largest_generic_platform_cluster_size` should not jump unexpectedly
 
 ## Document Map
 
-- `README.md`: canonical project skill and design contract.
-- `AGENTS.md`: operational guide for coding agents.
-- `RUNBOOK.md`: concrete daily operating procedures.
-- `QUICK_REFERENCE.md`: command card for frequent actions.
+- `README.md`: design contract and current architecture
+- `RUNBOOK.md`: operating procedures and report interpretation
+- `QUICK_REFERENCE.md`: concise command card
+- `AGENTS.md`: agent implementation guidance
+- `EVIDENCE_DRIVEN_ITERATION.md`: real-run workflow for isolated evaluation
+- `TODO_RUNTIME_FOLLOWUP.md`: latest real-run baseline, remaining issues, and next-step priorities

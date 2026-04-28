@@ -9,23 +9,31 @@ description: Follow this runbook to operate the bookmark pipeline, recover from 
 
 Use this document for day-to-day execution. For design intent and extension rules, read `README.md` and `AGENTS.md`.
 
-The normal source file is:
+Default paths:
 
 ```text
-data/bookmarks.html
+input:  data/bookmarks.html
+config: skill_config.json
+output: output/organized_bookmarks.html
 ```
 
-The normal config file is:
+## Recommended Real Run
 
-```text
-skill_config.json
+When network access matters, the current preferred command is:
+
+```bash
+export https_proxy=http://127.0.0.1:7897
+export http_proxy=http://127.0.0.1:7897
+export all_proxy=socks5://127.0.0.1:7897
+
+./organize.sh data/bookmarks.html skill_config.json --use-proxy --trust-env --direct-retry-after-proxy
 ```
 
-The normal final output is:
+Why this is preferred:
 
-```text
-output/organized_bookmarks.html
-```
+- the proxy-first pass captures the majority of reachable pages
+- the built-in direct retry only revisits unresolved rows
+- final fetch stats include `multi_pass_mode`, `pass_summaries`, and `pass_deltas`
 
 ## Preflight
 
@@ -43,15 +51,18 @@ If dependency import fails:
 python3 -m pip install -r requirements.txt
 ```
 
-If HTTPS fails, fix the Python environment or use a known working environment before running the fetch step.
+If your local Python environment has SSL or network issues but `conda` is known-good, use:
+
+```bash
+conda run -n base ./organize.sh data/bookmarks.html skill_config.json
+```
 
 ## Decision Table
 
 | Situation | Command |
 | --- | --- |
 | First normal run | `./organize.sh data/bookmarks.html skill_config.json` |
-| Network needs proxy | `./organize.sh data/bookmarks.html skill_config.json --use-proxy --trust-env` |
-| Forgot proxy and want to retry failures | same proxy command; successful fetch cache is reused |
+| Network needs proxy | `./organize.sh data/bookmarks.html skill_config.json --use-proxy --trust-env --direct-retry-after-proxy` |
 | Want to refresh all pages | `./organize.sh data/bookmarks.html skill_config.json --force-refetch` |
 | Want to discard only fetch cache | `./organize.sh data/bookmarks.html skill_config.json --clear-fetch-cache` |
 | Want to discard all generated state | `./organize.sh data/bookmarks.html skill_config.json --reset-all` |
@@ -79,12 +90,13 @@ output/reports/needs_confirmation.json
 output/reports/review_queue.json
 output/reports/rule_suggestions.json
 output/reports/quality_report.json
+output/reports/signal_audit.json
 logs/bookmarks_organizer.log
 ```
 
 ## Proxy Run
 
-Set proxy variables in the shell:
+Set proxy variables:
 
 ```bash
 export https_proxy=http://127.0.0.1:7897
@@ -95,15 +107,16 @@ export all_proxy=socks5://127.0.0.1:7897
 Run:
 
 ```bash
-./organize.sh data/bookmarks.html skill_config.json --use-proxy --trust-env
+./organize.sh data/bookmarks.html skill_config.json --use-proxy --trust-env --direct-retry-after-proxy
 ```
 
 Important behavior:
 
-- `--use-proxy` enables proxy support.
-- `--trust-env` lets `aiohttp` read proxy variables from the shell.
-- Already successful fetches in `data/bookmarks_with_info.json` are reused by default.
-- Failed, skipped, timeout, and broken fetches are retried.
+- `--use-proxy` enables proxy support
+- `--trust-env` lets `aiohttp` read proxy variables from the shell
+- `--direct-retry-after-proxy` performs a second direct pass only for rows still needing review
+- successful rows from the first pass are reused
+- final fetch stats preserve proxy-mode summary and direct-retry summary
 
 ## Force Full Refetch
 
@@ -116,7 +129,7 @@ Use this only when prior metadata is broadly untrusted or when page content shou
 With proxy:
 
 ```bash
-./organize.sh data/bookmarks.html skill_config.json --force-refetch --use-proxy --trust-env
+./organize.sh data/bookmarks.html skill_config.json --force-refetch --use-proxy --trust-env --direct-retry-after-proxy
 ```
 
 ## Clear Fetch Cache
@@ -150,16 +163,16 @@ python3 scripts/5_cluster_bookmarks.py --config skill_config.json
 python3 scripts/6_generate_html.py --config skill_config.json
 ```
 
+Proxy-first fetch with built-in direct retry:
+
+```bash
+python3 scripts/3_fetch_webpage_info.py --config skill_config.json --use-proxy --trust-env --direct-retry-after-proxy
+```
+
 Common partial reruns:
 
 ```bash
-# Refetch failures, then rebuild downstream artifacts.
-python3 scripts/3_fetch_webpage_info.py --config skill_config.json --use-proxy --trust-env
-python3 scripts/4_classify_bookmarks.py --config skill_config.json
-python3 scripts/5_cluster_bookmarks.py --config skill_config.json
-python3 scripts/6_generate_html.py --config skill_config.json
-
-# Reapply changed classification rules without fetching.
+# Rebuild downstream artifacts from existing fetch output.
 python3 scripts/4_classify_bookmarks.py --config skill_config.json
 python3 scripts/5_cluster_bookmarks.py --config skill_config.json
 python3 scripts/6_generate_html.py --config skill_config.json
@@ -167,73 +180,151 @@ python3 scripts/6_generate_html.py --config skill_config.json
 # Rebuild clusters and HTML after clustering logic changes.
 python3 scripts/5_cluster_bookmarks.py --config skill_config.json
 python3 scripts/6_generate_html.py --config skill_config.json
+
+# Rebuild only HTML after display/template changes.
+python3 scripts/6_generate_html.py --config skill_config.json
 ```
 
-## Reports
+## Latest Validated Baseline
+
+Real-input validation on `2026-04-28` is recorded in `TODO_RUNTIME_FOLLOWUP.md`.
+
+Headline metrics from that run:
+
+- input bookmarks: `1012`
+- duplicates: `199`
+- unique domains: `437`
+- fetch success: `745`
+- fetch review queue: `92`
+- classify `待确认`: `276`
+- classify `待整理`: `279`
+- cluster count: `716`
+- discovery clusters: `28`
+- mixed clusters: `30`
+
+Use that file as the continuation baseline when doing behavior-sensitive work.
+
+## Report Semantics
 
 ### `duplicates.json`
 
-Shows duplicate normalized bookmark URLs from parsing. Use it to identify source bookmark duplication.
+Duplicate normalized bookmark URLs from parsing.
+
+Use it to identify source bookmark duplication, not fetch or classification issues.
 
 ### `broken_links.json`
 
-Shows invalid URLs, non-HTTP URLs, HTTP errors, timeouts, and fetch errors.
+Only HTTP-broken rows that stayed in `fetch_status == "broken"` and were not suppressed by trusted-access policy.
+
+Typical contents:
+
+- `404`
+- `403`
+- `521`
+- similar HTTP error statuses
+
+This file is intentionally narrower than `review_queue.json`.
 
 ### `review_queue.json`
 
-Shows items that need human review because link health is questionable.
+All rows whose final `link_health.review_required == true`.
 
-Trusted-access policy can suppress review noise for high-friction sites such as `zhihu.com`, `csdn.net`, `github.com`, `gitbook.com`, and `gitbook.io`.
+This includes:
+
+- HTTP errors
+- DNS/connection failures
+- timeouts
+- certificate failures
+- invalid URLs
+
+Trusted-access policy may suppress some noisy sites such as `zhihu.com`, `csdn.net`, `github.com`, `gitbook.com`, and `gitbook.io`.
 
 ### `needs_confirmation.json`
 
-Shows classification results that did not meet the confidence threshold.
+Classification results that did not meet the assignment bar.
 
-These are candidates for `待整理`, `发现主题`, or future rule updates.
+Important fields to inspect:
+
+- confirmation bucket
+- confirmation reasons
+- top decision drivers
+- open topic candidates
+
+This is the main report for deciding whether uncertainty came from:
+
+- fetch blockage
+- rule coverage gaps
+- low-confidence matches
 
 ### `rule_suggestions.json`
 
-Shows rule improvement candidates.
+Structured rule-improvement suggestions.
 
-Use this report to decide whether to:
+Current suggestion types include:
 
-- create a new topic;
-- add a specific domain;
-- add a keyword or alias;
-- split a mixed cluster;
-- demote noisy evidence.
+- `add_alias`
+- `add_specific_domain`
+- `create_topic`
+- `split_mixed_cluster`
+- `investigate_fetch_failures`
 
-Do not blindly apply suggestions. Check representative bookmarks first.
+Do not apply suggestions blindly. Check representative bookmarks first.
 
 ### `quality_report.json`
 
-Main quality metrics:
+Main quality summary. Current sections include:
 
-- `folder_only_classification_count`: should be `0`.
-- `low_confidence_normal_category_count`: should be `0`.
-- `generic_platform_domain_suggestion_count`: should be `0`.
-- `discovery_cluster_count`: large values suggest missing rules or emerging themes.
-- `tidy_cluster_count`: large values suggest insufficient evidence or intentionally conservative routing.
-- `mixed_cluster_count`: inspect for cluster splitting needs.
-- `largest_generic_platform_cluster_size`: watch for platform-source over-merge.
+- `metrics`
+- `largest_discovery_clusters`
+- `largest_tidy_clusters`
+- `largest_mixed_clusters`
+- `largest_generic_platform_clusters`
+- `largest_fetch_blocked_clusters`
+- `largest_flat_normal_roots`
+- `review_hotspots`
 
-## Review Workflow After Importing HTML
+Key metrics to watch:
 
-After importing `output/organized_bookmarks.html` into Chrome, inspect in this order:
+- `folder_only_classification_count`
+- `low_confidence_normal_category_count`
+- `generic_platform_domain_suggestion_count`
+- `fetch_blocked_discovery_cluster_count`
+- `mixed_cluster_count`
+- `normal_root_direct_bookmark_share`
+- `flat_normal_root_count`
 
-1. `待审阅`
-2. `待整理`
-3. `发现主题`
-4. High-value roots under `技术主题`
-5. `rule_suggestions.json`
-6. `quality_report.json`
+### `signal_audit.json`
+
+Signal collection and consumption audit.
+
+Current sections include:
+
+- `summary`
+- `families`
+- `fields`
+- `unused_high_value_signals`
+- `hotspots`
+
+Use this before adding new fetch heuristics. Prefer consuming existing collected signals first.
+
+## Review Workflow After A Real Run
+
+Inspect in this order:
+
+1. `output/reports/review_queue.json`
+2. `output/reports/needs_confirmation.json`
+3. `output/reports/quality_report.json`
+4. `output/reports/rule_suggestions.json`
+5. `output/reports/signal_audit.json`
+6. `output/organized_bookmarks.html`
 
 Interpretation:
 
-- `待审阅`: link health problem or suspicious fetch state.
-- `待整理`: not enough reliable evidence for normal category assignment.
-- `发现主题`: cluster has meaningful discovered labels but no stable destination root.
-- Normal roots: assigned only when evidence and support are sufficient.
+- `待审阅`: link health problem or suspicious fetch state
+- `待整理`: not enough reliable evidence for normal-category assignment
+- `发现主题`: cluster has meaningful but unsupported topic concentration
+- `rule_suggestions.json`: next likely rule or clustering work
+- `signal_audit.json`: missing use of already-collected evidence
 
 ## Expected Count Difference
 
@@ -242,7 +333,7 @@ If `review_hierarchy` is present, reviewed bookmarks are mirrored into `待审�
 So:
 
 ```text
-generated HTML bookmark count = normal hierarchy count + review mirror count
+generated HTML bookmark count = main hierarchy count + review mirror count
 ```
 
 This is expected. Validate uniqueness in the main hierarchy, not by raw HTML count alone.
@@ -259,17 +350,23 @@ python3 -m pip install -r requirements.txt
 
 ### Fetch Produces Too Many Failures
 
-Use proxy:
+Use the preferred proxy command:
 
 ```bash
-./organize.sh data/bookmarks.html skill_config.json --use-proxy --trust-env
+./organize.sh data/bookmarks.html skill_config.json --use-proxy --trust-env --direct-retry-after-proxy
 ```
 
-If prior failed metadata is stale:
+If the fetch cache is stale:
 
 ```bash
-./organize.sh data/bookmarks.html skill_config.json --clear-fetch-cache --use-proxy --trust-env
+./organize.sh data/bookmarks.html skill_config.json --clear-fetch-cache --use-proxy --trust-env --direct-retry-after-proxy
 ```
+
+If the failures are concentrated on a few domains, inspect:
+
+- `output/reports/review_queue.json`
+- `output/reports/quality_report.json`
+- `TODO_RUNTIME_FOLLOWUP.md`
 
 ### Too Many Items In `待整理`
 
@@ -279,9 +376,15 @@ Inspect:
 output/reports/needs_confirmation.json
 output/reports/rule_suggestions.json
 output/reports/quality_report.json
+output/reports/signal_audit.json
 ```
 
-Then add precise rules to `data/category_rules_overrides.json`.
+Then decide whether the main issue is:
+
+- fetch blockage
+- rule gaps
+- generic-platform naming noise
+- mixed clusters
 
 ### Generic Platform Cluster Is Too Large
 
@@ -289,12 +392,12 @@ Inspect `largest_generic_platform_clusters` in `quality_report.json`.
 
 Prefer these fixes:
 
-- remove platform tokens from cluster hints;
-- add specific non-platform topic keywords;
-- add topic-specific project/product domains;
-- split mixed clusters.
+- remove source/platform tokens from cluster labels and hints
+- add precise non-platform topic aliases
+- add topic-specific project/product domains
+- split mixed clusters earlier
 
-Avoid adding `github.com`, `csdn.net`, `zhihu.com`, `medium.com`, or similar broad domains to topic categories.
+Avoid adding `github.com`, `csdn.net`, `zhihu.com`, `docs.qq.com`, or similar broad domains to topic categories.
 
 ## Validation Before Commit
 

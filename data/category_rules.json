@@ -132,7 +132,9 @@
       "domains": [
         "pingcap.com",
         "docs.pingcap.com",
-        "tidb.io"
+        "tidb.io",
+        "book.tidb.io",
+        "asktug.com"
       ],
       "keywords": [
         "tidb",
@@ -147,6 +149,23 @@
       "folder_keywords": [
         "tidb",
         "TiDB"
+      ]
+    },
+    "数据库/openGauss": {
+      "domains": [
+        "opengauss.org",
+        "docs.opengauss.org"
+      ],
+      "keywords": [
+        "opengauss"
+      ],
+      "title_patterns": [
+        "openGauss",
+        "opengauss"
+      ],
+      "folder_keywords": [
+        "opengauss",
+        "openGauss"
       ]
     },
     "数据库/PostgreSQL": {
@@ -204,6 +223,98 @@
         "Redis"
       ]
     },
+    "数据库/DuckDB": {
+      "domains": [
+        "duckdb.org",
+        "duckdb.net.cn"
+      ],
+      "keywords": [
+        "duckdb"
+      ],
+      "title_patterns": [
+        "DuckDB",
+        "duckdb"
+      ],
+      "folder_keywords": [
+        "duckdb",
+        "DuckDB"
+      ]
+    },
+    "数据库/RocksDB": {
+      "domains": [
+        "rocksdb.org",
+        "rocksdb.org.cn"
+      ],
+      "keywords": [
+        "rocksdb",
+        "sstable"
+      ],
+      "title_patterns": [
+        "RocksDB",
+        "rocksdb"
+      ],
+      "folder_keywords": [
+        "rocksdb",
+        "RocksDB"
+      ]
+    },
+    "数据库/BenchmarkSQL": {
+      "domains": [
+        "benchmarksql.readthedocs.io"
+      ],
+      "keywords": [
+        "benchmarksql",
+        "tpc-c"
+      ],
+      "title_patterns": [
+        "BenchmarkSQL",
+        "benchmarksql"
+      ],
+      "folder_keywords": [
+        "benchmarksql",
+        "BenchmarkSQL"
+      ]
+    },
+    "数据库/TPC": {
+      "domains": [
+        "tpc.org"
+      ],
+      "keywords": [
+        "tpc-c",
+        "tpc-h",
+        "tpc-ds",
+        "full disclosure report"
+      ],
+      "title_patterns": [
+        "TPC",
+        "TPC-C",
+        "TPC-H",
+        "TPC-DS"
+      ],
+      "folder_keywords": [
+        "tpc",
+        "TPC"
+      ]
+    },
+    "数据库/InfluxDB": {
+      "domains": [
+        "influxdata.com",
+        "docs.influxdata.com"
+      ],
+      "keywords": [
+        "influxdb",
+        "line protocol",
+        "tsbs"
+      ],
+      "title_patterns": [
+        "InfluxDB",
+        "influxdb"
+      ],
+      "folder_keywords": [
+        "influxdb",
+        "InfluxDB"
+      ]
+    },
     "数据库/其他": {
       "domains": [
         "mongodb.com",
@@ -217,9 +328,7 @@
         "nosql",
         "mongodb",
         "sqlite",
-        "etcd",
-        "rocksdb",
-        "duckdb"
+        "etcd"
       ],
       "title_patterns": [
         "[Dd]atabase.*",
@@ -228,9 +337,7 @@
       "folder_keywords": [
         "数据库",
         "database",
-        "etcd",
-        "rocksdb",
-        "duckdb"
+        "etcd"
       ]
     },
     "分布式系统/Docker": {
@@ -554,6 +661,27 @@
         "monitoring"
       ]
     },
+    "DevOps/Ansible": {
+      "domains": [
+        "ansible.com",
+        "ansible.com.cn",
+        "docs.ansible.com"
+      ],
+      "keywords": [
+        "ansible",
+        "ansible-playbook",
+        "playbook",
+        "inventory"
+      ],
+      "title_patterns": [
+        "Ansible",
+        "ansible"
+      ],
+      "folder_keywords": [
+        "ansible",
+        "Ansible"
+      ]
+    },
     "安全": {
       "domains": [
         "owasp.org",
@@ -642,6 +770,26 @@
       ],
       "folder_keywords": [
         "git"
+      ]
+    },
+    "开发工具/Chrome扩展": {
+      "domains": [
+        "developer.chrome.com"
+      ],
+      "keywords": [
+        "chrome extension",
+        "chrome extensions",
+        "manifest v3",
+        "extension service worker"
+      ],
+      "title_patterns": [
+        "Chrome Extensions",
+        "Manifest V3",
+        "Chrome 扩展"
+      ],
+      "folder_keywords": [
+        "chrome extension",
+        "Chrome Extensions"
       ]
     },
     "开发工具/其他": {
@@ -769,6 +917,22 @@
       "folder_keywords": [
         "网络",
         "network"
+      ]
+    },
+    "网络编程/RDMA": {
+      "domains": [],
+      "keywords": [
+        "rdma",
+        "roce",
+        "infiniband"
+      ],
+      "title_patterns": [
+        "RDMA",
+        "rdma"
+      ],
+      "folder_keywords": [
+        "rdma",
+        "RDMA"
       ]
     },
     "操作系统": {
@@ -1011,6 +1175,7 @@
     "zhihu.com",
     "csdn.net",
     "51cto.com",
+    "jianshu.com",
     "docs.qq.com",
     "qq.com",
     "docs.google.com",
@@ -1279,6 +1444,23 @@
       "aws",
       "gcp",
       "k8s"
+    ],
+    "blocked_tokens": [
+      "excel",
+      "word",
+      "action",
+      "awesome",
+      "ahead",
+      "research",
+      "stable",
+      "book",
+      "repository",
+      "developers",
+      "performance",
+      "腾讯文档",
+      "官方网站",
+      "在线文档",
+      "文档中心"
     ],
     "max_candidates": 8
   }

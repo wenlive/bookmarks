@@ -18,7 +18,8 @@
     "confirmation_report_file": "output/reports/needs_confirmation.json",
     "review_report_file": "output/reports/review_queue.json",
     "rule_suggestions_report_file": "output/reports/rule_suggestions.json",
-    "quality_report_file": "output/reports/quality_report.json"
+    "quality_report_file": "output/reports/quality_report.json",
+    "signal_audit_report_file": "output/reports/signal_audit.json"
   },
   "fetch_options": {
     "concurrent_limit": 15,
@@ -99,6 +100,7 @@
       "zhihu.com",
       "csdn.net",
       "51cto.com",
+      "jianshu.com",
       "docs.qq.com",
       "qq.com",
       "docs.google.com",

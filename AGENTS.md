@@ -11,11 +11,11 @@ Improve the actual usefulness of generated Chrome bookmarks.
 
 Primary success criteria:
 
-- Fewer unrelated bookmarks in the same normal category.
-- Fewer false assignments caused by stale Chrome folders.
-- Fewer rules that hard-code broad platforms as topics.
-- More useful `待整理`, `发现主题`, `待审阅`, and rule suggestion outputs.
-- Stable, reproducible commands and reports.
+- fewer unrelated bookmarks in the same normal category
+- fewer false assignments caused by stale Chrome folders
+- fewer rules that hard-code broad platforms as topics
+- more useful `待整理`, `发现主题`, `待审阅`, and rule suggestion outputs
+- stable, reproducible commands and reports
 
 ## First Files To Read
 
@@ -24,11 +24,14 @@ Read in this order:
 1. `README.md`
 2. `RUNBOOK.md`
 3. `QUICK_REFERENCE.md`
-4. `skill_config.json`
-5. `scripts/common.py`
-6. `scripts/4_classify_bookmarks.py`
-7. `scripts/5_cluster_bookmarks.py`
-8. `tests/test_pipeline.py`
+4. `TODO_RUNTIME_FOLLOWUP.md`
+5. `EVIDENCE_DRIVEN_ITERATION.md`
+6. `skill_config.json`
+7. `scripts/common.py`
+8. `scripts/3_fetch_webpage_info.py`
+9. `scripts/4_classify_bookmarks.py`
+10. `scripts/5_cluster_bookmarks.py`
+11. `tests/test_pipeline.py`
 
 ## Current Architecture
 
@@ -40,20 +43,26 @@ copy -> parse -> fetch -> classify -> cluster -> generate html
 
 The important design shift is from folder-driven classification to information-flow-driven classification.
 
-The shared `signal_pack` in `scripts/common.py` is the stable handoff between fetch, classification, and clustering. Prefer adding reusable signals there instead of duplicating extraction logic across classifier and clusterer.
+The shared `signal_pack/v2` in `scripts/common.py` is the stable handoff between fetch, classification, and clustering. Prefer adding reusable signals there instead of duplicating extraction logic across classifier and clusterer.
+
+Stage outputs are versioned and downstream steps reject stale payloads:
+
+- `fetch_output/v2`
+- `classified_output/v2`
+- `clustering_output/v2`
 
 ## Invariants
 
 Keep these invariants unless the user explicitly asks for a different product behavior:
 
-- Original Chrome folder path is context, not strong topic evidence.
-- Low-confidence normal-category assignments should be downgraded to `待整理`.
-- Discovered but unsupported clusters should go to `发现主题`.
-- Broken or suspicious links should be preserved.
-- Review-required links should be mirrored to `待审阅`.
-- Generic platforms should not become topic evidence by domain alone.
-- Reports should explain why output needs review or rule improvement.
-- Generated state should stay ignored; source rules and docs should be tracked.
+- original Chrome folder path is context, not strong topic evidence
+- low-confidence normal-category assignments should be downgraded to `待整理`
+- discovered but unsupported clusters should go to `发现主题`
+- broken or suspicious links should be preserved
+- review-required links should be mirrored to `待审阅`
+- generic platforms should not become topic evidence by domain alone
+- reports should explain why output needs review or rule improvement
+- generated state should stay ignored; source rules and docs should be tracked
 
 ## Generic Platform Policy
 
@@ -70,7 +79,10 @@ stackexchange.com
 medium.com
 zhihu.com
 csdn.net
+51cto.com
+jianshu.com
 docs.qq.com
+qq.com
 google.com
 notion.so
 youtube.com
@@ -79,9 +91,38 @@ bilibili.com
 
 Agent rule:
 
-- Do not add these domains as topic category domains.
-- Do use them to suppress source-like labels.
-- Do let title, description, repository name, project name, schema type, and page content provide topic evidence.
+- do not add these domains as topic category domains
+- do use them to suppress source-like labels
+- do let title, description, repository name, product name, schema type, and page content provide topic evidence
+
+## Fetch Layer
+
+Primary file:
+
+```text
+scripts/3_fetch_webpage_info.py
+```
+
+Responsibilities:
+
+- fetch page metadata and site/profile signals
+- normalize link health
+- record fetch provenance in `fetch_context`
+- support proxy-first fetch plus automatic direct retry
+- emit `broken_links.json` and `review_queue.json`
+
+Current known facts:
+
+- real-input validation on `2026-04-28` is already done
+- Brotli decode failures and XML parser warnings were addressed
+- current remaining fetch work is hotspot-domain cleanup, not global fetch failure
+
+When improving fetch:
+
+- keep proxy-first plus direct-retry behavior intact
+- do not widen trusted-access policy casually
+- separate network failures from taxonomy failures before proposing rule changes
+- validate with a real run when changing transport, retry, parsing, or trusted-access logic
 
 ## Classification Layer
 
@@ -93,21 +134,22 @@ scripts/4_classify_bookmarks.py
 
 Responsibilities:
 
-- Load and merge default rules plus overrides.
-- Build or consume `signal_pack`.
-- Score rule categories.
-- Infer resource type, intent labels, quality signals.
-- Extract dynamic open-topic candidates.
-- Downgrade low-confidence items to `待整理`.
-- Emit `needs_confirmation.json`.
+- load and merge default rules plus overrides
+- build or consume `signal_pack/v2`
+- score rule categories
+- infer resource type, intent labels, and quality signals
+- extract dynamic open-topic candidates
+- downgrade low-confidence items to `待整理`
+- emit `needs_confirmation.json`
 
 When improving classification:
 
-- Prefer precise domain rules for topic-specific domains.
-- Prefer title patterns for stable product/project names.
-- Prefer content and metadata signals over folder names.
-- Add tests for false positive and false negative cases.
-- Check `low_confidence_normal_category_count` remains `0`.
+- prefer precise domain rules for topic-specific domains
+- prefer title patterns and narrow aliases for stable product/project names
+- prefer content and metadata signals over folder names
+- keep operational fetch terms out of topic extraction
+- add tests for false positive and false negative cases
+- check `low_confidence_normal_category_count` remains `0`
 
 ## Clustering Layer
 
@@ -119,20 +161,27 @@ scripts/5_cluster_bookmarks.py
 
 Responsibilities:
 
-- Build feature sets from classification plus `signal_pack`.
-- Compute similarity.
-- Prevent generic platform over-merge.
-- Decide destination root.
-- Build display hierarchy.
-- Emit `rule_suggestions.json` and `quality_report.json`.
+- build feature sets from classification plus `signal_pack/v2`
+- compute similarity
+- prevent generic-platform over-merge
+- decide destination root
+- build display hierarchy
+- emit `rule_suggestions.json`, `quality_report.json`, and `signal_audit.json`
 
 When improving clustering:
 
-- Keep similarity explainable.
-- Penalize cross-topic merges when evidence is weak.
-- Keep source/platform labels from dominating cluster names.
-- Add quality metrics when introducing new routing behavior.
-- Add tests for mixed clusters and generic platform clusters.
+- keep similarity explainable
+- penalize cross-topic merges when evidence is weak
+- keep source/platform labels from dominating cluster names
+- add quality metrics when introducing new routing behavior
+- add tests for mixed clusters and generic-platform clusters
+
+Current known pain points:
+
+- discovery naming noise
+- generic-platform cluster naming quality
+- mixed clusters that should split earlier
+- flat normal roots and high direct-bookmark share in some roots
 
 ## Rule Files
 
@@ -150,11 +199,11 @@ data/category_rules_overrides.json
 
 Preferred workflow:
 
-1. Run pipeline.
-2. Inspect `rule_suggestions.json` and `quality_report.json`.
-3. Add narrow overrides.
-4. Rerun steps 4, 5, 6.
-5. Validate tests and quality metrics.
+1. run pipeline
+2. inspect `rule_suggestions.json`, `quality_report.json`, and `signal_audit.json`
+3. add narrow overrides or aliases
+4. rerun steps 4, 5, 6
+5. validate tests and quality metrics
 
 ## Command Policy
 
@@ -164,10 +213,14 @@ Normal run:
 ./organize.sh data/bookmarks.html skill_config.json
 ```
 
-Proxy run:
+Preferred real-network run:
 
 ```bash
-./organize.sh data/bookmarks.html skill_config.json --use-proxy --trust-env
+export https_proxy=http://127.0.0.1:7897
+export http_proxy=http://127.0.0.1:7897
+export all_proxy=socks5://127.0.0.1:7897
+
+./organize.sh data/bookmarks.html skill_config.json --use-proxy --trust-env --direct-retry-after-proxy
 ```
 
 Classification-only downstream rerun:
@@ -189,45 +242,63 @@ pytest -q
 git diff --check
 ```
 
-For behavior-sensitive changes, run a real pipeline pass using `/tmp` outputs if you do not want to overwrite tracked or user-facing generated files.
+For behavior-sensitive changes, prefer an isolated runtime workspace under `/tmp` so you do not overwrite tracked or user-facing generated files.
+
+## Evidence-Driven Iteration
+
+When an agent needs to validate this project on a real bookmark export and turn the result into concrete improvements, follow:
+
+```text
+EVIDENCE_DRIVEN_ITERATION.md
+```
+
+Use:
+
+```text
+TODO_RUNTIME_FOLLOWUP.md
+```
+
+as the latest real-run baseline and continuation point.
 
 ## Review Reports Before Finalizing
 
 Inspect:
 
 ```text
-output/reports/quality_report.json
-output/reports/rule_suggestions.json
+output/reports/review_queue.json
 output/reports/needs_confirmation.json
+output/reports/rule_suggestions.json
+output/reports/quality_report.json
+output/reports/signal_audit.json
 ```
 
 For temporary verification outputs, use the same files under `/tmp` and report the metrics.
 
 ## Common Safe Improvements
 
-- Add a new structured signal to `signal_pack`.
-- Add a narrow topic alias or domain override.
-- Add a regression test for misclassification.
-- Adjust generic platform token filtering.
-- Improve cluster destination routing from weak evidence to `待整理` or `发现主题`.
-- Improve report fields that explain why a cluster needs attention.
+- add a new structured signal to `signal_pack`
+- add a narrow topic alias or domain override
+- add a regression test for misclassification
+- adjust generic-platform token filtering
+- improve cluster destination routing from weak evidence to `待整理` or `发现主题`
+- improve report fields that explain why a cluster needs attention
 
 ## Common Risky Changes
 
-- Raising confidence globally without real-output validation.
-- Adding broad domains to a topic category.
-- Reusing source folder names as strong evidence.
-- Optimizing for fewer `待整理` items at the cost of false normal classifications.
-- Treating `review_hierarchy` mirror count as duplicate output.
-- Changing generated output shape without updating `scripts/6_generate_html.py` tests.
+- raising confidence globally without real-output validation
+- adding broad domains to a topic category
+- reusing source folder names as strong evidence
+- optimizing for fewer `待整理` items at the cost of false normal classifications
+- treating `review_hierarchy` mirror count as duplicate output
+- changing generated output shape without updating `scripts/6_generate_html.py` tests
+- using fetch operational fields such as `homepage_source` as topic evidence
 
 ## Commit Readiness
 
 A change is ready when:
 
-- Worktree only contains intended source/docs/test changes.
-- Tests pass.
-- JSON config loads.
-- Docs describe actual commands and output paths.
-- Quality metrics do not regress in the direction of folder-only classification, low-confidence normal classification, or generic-platform suggestions.
-
+- worktree only contains intended source/docs/test changes
+- tests pass
+- JSON config loads
+- docs describe actual commands, output paths, and report semantics
+- quality metrics do not regress in the direction of folder-only classification, low-confidence normal classification, generic-platform suggestions, or fetch-blocked discovery clusters

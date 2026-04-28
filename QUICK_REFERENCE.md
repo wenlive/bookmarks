@@ -11,14 +11,14 @@ description: Fast command reference for operating and validating the Chrome book
 ./organize.sh data/bookmarks.html skill_config.json
 ```
 
-## Run With Proxy
+## Preferred Proxy Run
 
 ```bash
 export https_proxy=http://127.0.0.1:7897
 export http_proxy=http://127.0.0.1:7897
 export all_proxy=socks5://127.0.0.1:7897
 
-./organize.sh data/bookmarks.html skill_config.json --use-proxy --trust-env
+./organize.sh data/bookmarks.html skill_config.json --use-proxy --trust-env --direct-retry-after-proxy
 ```
 
 ## Reset Modes
@@ -45,15 +45,21 @@ python3 scripts/5_cluster_bookmarks.py --config skill_config.json
 python3 scripts/6_generate_html.py --config skill_config.json
 ```
 
+Proxy-first fetch with automatic direct retry:
+
+```bash
+python3 scripts/3_fetch_webpage_info.py --config skill_config.json --use-proxy --trust-env --direct-retry-after-proxy
+```
+
 ## Partial Reruns
 
 ```bash
-# Rules changed.
+# Rules or classification logic changed.
 python3 scripts/4_classify_bookmarks.py --config skill_config.json
 python3 scripts/5_cluster_bookmarks.py --config skill_config.json
 python3 scripts/6_generate_html.py --config skill_config.json
 
-# Clustering/display changed.
+# Clustering or display logic changed.
 python3 scripts/5_cluster_bookmarks.py --config skill_config.json
 python3 scripts/6_generate_html.py --config skill_config.json
 
@@ -67,11 +73,11 @@ python3 scripts/6_generate_html.py --config skill_config.json
 | --- | --- |
 | `skill_config.json` | Operational config |
 | `data/category_rules.json` | Shared default rules |
-| `data/category_rules_overrides.json` | Personal/local rule extensions |
+| `data/category_rules_overrides.json` | Local rule extensions |
 | `data/bookmarks.html` | Copied Chrome export |
 | `data/bookmarks_with_info.json` | Fetch cache and enriched metadata |
 | `data/classified_bookmarks.json` | Classification result |
-| `data/clustering_result.json` | Clustered hierarchy payload |
+| `data/clustering_result.json` | Cluster hierarchy payload |
 | `output/organized_bookmarks.html` | Chrome import output |
 
 ## Reports
@@ -83,7 +89,17 @@ output/reports/needs_confirmation.json
 output/reports/review_queue.json
 output/reports/rule_suggestions.json
 output/reports/quality_report.json
+output/reports/signal_audit.json
 ```
+
+## Report Meanings
+
+- `broken_links.json`: HTTP-broken rows only
+- `review_queue.json`: all review-required fetch outcomes
+- `needs_confirmation.json`: rule-gap, fetch-blocked, or low-confidence classification output
+- `rule_suggestions.json`: `add_alias`, `add_specific_domain`, `create_topic`, `split_mixed_cluster`, `investigate_fetch_failures`
+- `quality_report.json`: discovery, mixed, generic-platform, flat-root, and review-hotspot summaries
+- `signal_audit.json`: collected vs consumed signals plus unused high-value fields
 
 ## Quality Check
 
@@ -102,21 +118,24 @@ In `output/reports/quality_report.json`:
 folder_only_classification_count == 0
 low_confidence_normal_category_count == 0
 generic_platform_domain_suggestion_count == 0
-largest_generic_platform_cluster_size is not unexpectedly large
+fetch_blocked_discovery_cluster_count == 0
+mixed_cluster_count does not unexpectedly spike
+normal_root_direct_bookmark_share does not grow unexpectedly
 ```
 
 ## Agent Rules
 
 - Treat `README.md` as the design contract.
-- Treat `RUNBOOK.md` as the operational procedure.
+- Treat `RUNBOOK.md` as the operating procedure.
 - Treat `AGENTS.md` as the agent implementation guide.
+- Treat `TODO_RUNTIME_FOLLOWUP.md` as the latest real-run continuation baseline.
 - Do not trust old Chrome folders as topic evidence.
 - Do not classify by broad platform domain.
 - Preserve broken links; mirror them to `待审阅`.
-- Prefer precise overrides in `data/category_rules_overrides.json`.
+- Prefer precise overrides over broad default-rule edits.
 - Rerun only the downstream steps required by the change.
 
-## Output Shape
+## Default Output Shape
 
 ```text
 书签栏
@@ -126,5 +145,5 @@ largest_generic_platform_cluster_size is not unexpectedly large
 ├── 个人与生活
 ├── 待整理
 ├── 发现主题
-└── 待审阅
+└── 待审阅  # only when review items exist
 ```

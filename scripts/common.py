@@ -14,6 +14,11 @@ from urllib.parse import urlsplit, urlunsplit
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = ROOT_DIR / "skill_config.json"
+FETCH_OUTPUT_SCHEMA_VERSION = "fetch_output/v2"
+CLASSIFIED_OUTPUT_SCHEMA_VERSION = "classified_output/v2"
+CLUSTERING_OUTPUT_SCHEMA_VERSION = "clustering_output/v2"
+SIGNAL_AUDIT_SCHEMA_VERSION = "signal_audit/v1"
+SIGNAL_PACK_SCHEMA_VERSION = "signal_pack/v2"
 DEFAULT_TRUSTED_ACCESS_POLICY = {
     "enabled": True,
     "domain_suffixes": [
@@ -71,6 +76,7 @@ DEFAULT_GENERIC_PLATFORM_DOMAINS = {
     "zhihu.com",
     "csdn.net",
     "51cto.com",
+    "jianshu.com",
     "docs.qq.com",
     "qq.com",
     "docs.google.com",
@@ -92,6 +98,7 @@ GENERIC_PLATFORM_TOKENS = {
     "zhuanlan",
     "csdn",
     "51cto",
+    "jianshu",
     "qq",
     "google",
     "notion",
@@ -124,6 +131,69 @@ GENERIC_PLATFORM_TOKENS = {
     "article",
     "weixin",
 }
+SOURCE_LIKE_TOPIC_TOKENS = {
+    re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", value.lower())
+    for value in {
+        "official",
+        "documentation",
+        "docs",
+        "doc",
+        "guide",
+        "manual",
+        "reference",
+        "intro",
+        "introduction",
+        "community",
+        "wiki",
+        "blog",
+        "blogs",
+        "article",
+        "articles",
+        "repository",
+        "repositories",
+        "repo",
+        "book",
+        "books",
+        "bookstack",
+        "page",
+        "pages",
+        "home",
+        "index",
+        "stable",
+        "latest",
+        "action",
+        "awesome",
+        "ahead",
+        "research",
+        "session",
+        "sessions",
+        "chapter",
+        "part",
+        "html",
+        "pdf",
+        "online",
+        "excel",
+        "word",
+        "ppt",
+        "slide",
+        "slides",
+        "sheet",
+        "performance",
+        "developers",
+        "developer",
+        "news",
+        "center",
+        "官方网站",
+        "在线文档",
+        "腾讯文档",
+        "文档中心",
+        "官方文档",
+        "开发者",
+        "社区",
+        "技术团队",
+        "稳定版",
+    }
+}
 
 
 @dataclass
@@ -145,6 +215,7 @@ class PipelinePaths:
     review_report_file: Path
     rule_suggestions_report_file: Path
     quality_report_file: Path
+    signal_audit_report_file: Path
 
 
 class JsonFormatter(logging.Formatter):
@@ -170,6 +241,7 @@ DEFAULT_PATHS = {
     "review_report_file": ROOT_DIR / "output" / "reports" / "review_queue.json",
     "rule_suggestions_report_file": ROOT_DIR / "output" / "reports" / "rule_suggestions.json",
     "quality_report_file": ROOT_DIR / "output" / "reports" / "quality_report.json",
+    "signal_audit_report_file": ROOT_DIR / "output" / "reports" / "signal_audit.json",
 }
 
 
@@ -236,6 +308,18 @@ def is_generic_platform_domain(domain: str, generic_domains: set[str] | None = N
     return any(domain_matches_suffix(domain, suffix) for suffix in domains)
 
 
+def normalize_topic_token(value: str) -> str:
+    return re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", (value or "").strip().lower())
+
+
+def is_source_like_topic_token(value: str, blocked_tokens: set[str] | None = None) -> bool:
+    token = normalize_topic_token(value)
+    if not token:
+        return False
+    tokens = blocked_tokens or SOURCE_LIKE_TOPIC_TOKENS
+    return token in tokens or bool(re.fullmatch(r"(part|session|chapter)\d+", token))
+
+
 SCHEMA_TYPE_RESOURCE_FACETS = {
     "article": "博客",
     "blogposting": "博客",
@@ -294,6 +378,63 @@ def _first_non_empty(*values: Any) -> str:
     return ""
 
 
+def signal_field_present(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, set, dict)):
+        return bool(value)
+    return True
+
+
+def signal_pack_sections(signal_pack: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    signal_pack = signal_pack or {}
+    return {
+        "identity": signal_pack.get("identity", {}) if isinstance(signal_pack.get("identity"), dict) else {},
+        "content": signal_pack.get("content", {}) if isinstance(signal_pack.get("content"), dict) else {},
+        "structure": signal_pack.get("structure", {}) if isinstance(signal_pack.get("structure"), dict) else {},
+        "health_access": signal_pack.get("health_access", {}) if isinstance(signal_pack.get("health_access"), dict) else {},
+        "context_time": signal_pack.get("context_time", {}) if isinstance(signal_pack.get("context_time"), dict) else {},
+    }
+
+
+def flatten_signal_pack(signal_pack: dict[str, Any] | None, *, include_empty: bool = False) -> dict[str, Any]:
+    flattened: dict[str, Any] = {}
+    for family, fields in signal_pack_sections(signal_pack).items():
+        for field, value in fields.items():
+            if include_empty or signal_field_present(value):
+                flattened[f"{family}.{field}"] = value
+    return flattened
+
+
+def signal_family_names(signal_pack: dict[str, Any] | None, *, include_empty: bool = False) -> set[str]:
+    return {
+        family
+        for family, fields in signal_pack_sections(signal_pack).items()
+        if include_empty or any(signal_field_present(value) for value in fields.values())
+    }
+
+
+def signal_field_names(signal_pack: dict[str, Any] | None, *, include_empty: bool = False) -> set[str]:
+    return set(flatten_signal_pack(signal_pack, include_empty=include_empty))
+
+
+def require_payload_schema(
+    payload: dict[str, Any],
+    expected_version: str,
+    stage_name: str,
+    path: Path | None = None,
+) -> dict[str, Any]:
+    actual = payload.get("schema_version")
+    if actual != expected_version:
+        location = f" ({path})" if path else ""
+        raise ValueError(
+            f"{stage_name}{location} schema_version 期望为 {expected_version}，实际为 {actual or 'missing'}。请从上游阶段重新生成产物。"
+        )
+    return payload
+
+
 def _metadata_profile_blocks(metadata: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     page = metadata.get("page_signals", {}) if isinstance(metadata.get("page_signals"), dict) else {}
     site = metadata.get("site_signals", {}) if isinstance(metadata.get("site_signals"), dict) else {}
@@ -346,11 +487,16 @@ def build_signal_pack(bookmark: dict[str, Any]) -> dict[str, Any]:
     meta_description = _first_non_empty(metadata.get("description"), page.get("description"), page_profile.get("description"))
     main_text = _first_non_empty(page.get("main_text_preview"), page_profile.get("main_text_preview"), metadata.get("content_preview"), page.get("content_preview"), page_profile.get("content_preview"))
     preferred_description = _first_non_empty(user_description, og_description, twitter_description, meta_description, main_text)
+    keywords_text = _clean_signal_text(metadata.get("keywords") or page.get("keywords") or page_profile.get("keywords"))
 
     page_type_hints = _as_text_list(page.get("page_type_hints") or page_profile.get("page_type_hints"))
     site_type_candidates = _as_text_list(site.get("site_type_candidates") or site_profile.get("site_type_candidates"))
     schema_types = _as_text_list(page.get("schema_types") or page_profile.get("schema_types"))
     code_languages = _as_text_list(page.get("code_languages") or page_profile.get("code_languages"))
+    headings = page.get("headings") or page_profile.get("headings") or {}
+    headings_h1 = _as_text_list((headings.get("h1") if isinstance(headings, dict) else []) or [h1])
+    headings_h2 = _as_text_list((headings.get("h2") if isinstance(headings, dict) else []) or [])
+    nav_text = _as_text_list(page.get("nav_text") or page_profile.get("nav_text"))
     resource_facets: list[str] = []
     for hint in page_type_hints + site_type_candidates:
         mapped = PAGE_TYPE_RESOURCE_FACETS.get(hint.lower())
@@ -366,6 +512,7 @@ def build_signal_pack(bookmark: dict[str, Any]) -> dict[str, Any]:
     site_name = _first_non_empty(site.get("site_name"), site_profile.get("site_name"), page.get("og:site_name"), page_profile.get("og:site_name"))
     brand_terms = _as_text_list(site.get("brand_terms") or site_profile.get("brand_terms"))
     source_facets = _as_text_list([site_name, metadata.get("registrable_domain"), bookmark.get("domain"), *brand_terms])
+    generator = _first_non_empty(page.get("generator"), page_profile.get("generator"))
 
     language = _first_non_empty(page.get("lang"), page_profile.get("lang"), site.get("content_language"), site_profile.get("content_language"))
     link_health = metadata.get("link_health", {}) if isinstance(metadata.get("link_health"), dict) else {}
@@ -385,42 +532,100 @@ def build_signal_pack(bookmark: dict[str, Any]) -> dict[str, Any]:
         bookmark.get("fetch_normalized_url"),
         normalize_fetch_url(bookmark.get("url", "")),
     )
+    normalized_url = _first_non_empty(metadata.get("normalized_url"), bookmark.get("fetch_normalized_url"), normalize_fetch_url(bookmark.get("url", "")))
     semantic_parts = [
         " ".join(title_candidates),
         preferred_description,
-        _clean_signal_text(metadata.get("keywords") or page.get("keywords") or page_profile.get("keywords")),
+        keywords_text,
         h1,
         main_text,
         " ".join(page_type_hints),
         " ".join(site_type_candidates),
         " ".join(schema_types),
-        _first_non_empty(page.get("generator"), page_profile.get("generator")),
+        generator,
         " ".join(code_languages),
         site_name,
         " ".join(brand_terms),
+        " ".join(headings_h2),
     ]
-
-    return {
-        "schema_version": "signal_pack/v1",
+    time_bucket = _bookmark_time_bucket(bookmark.get("add_date"))
+    identity = {
+        "saved_title": saved_name,
+        "normalized_url": normalized_url,
+        "canonical_identity": canonical_identity,
+        "domain": _clean_signal_text(bookmark.get("domain")),
+        "registrable_domain": _clean_signal_text(metadata.get("registrable_domain")),
+        "subdomain": _clean_signal_text(metadata.get("subdomain")),
+        "path_segments": _as_text_list(metadata.get("path_segments")),
+        "query_keys": _as_text_list(metadata.get("query_keys")),
+    }
+    content = {
         "preferred_title": preferred_title,
         "preferred_description": preferred_description,
         "semantic_text": " ".join(part for part in semantic_parts if part),
         "main_text": main_text,
         "title_candidates": title_candidates,
         "description_candidates": _as_text_list([user_description, og_description, twitter_description, meta_description, main_text]),
+        "keywords_text": keywords_text,
+        "language": language,
+        "code_languages": code_languages,
+    }
+    structure = {
         "page_type_hints": page_type_hints,
         "site_type_candidates": site_type_candidates,
         "schema_types": schema_types,
-        "generator": _first_non_empty(page.get("generator"), page_profile.get("generator")),
-        "code_languages": code_languages,
         "resource_facets": resource_facets,
         "source_facets": source_facets,
-        "quality_facets": _as_text_list(quality_facets),
-        "language": language,
-        "time_bucket": _bookmark_time_bucket(bookmark.get("add_date")),
-        "canonical_identity": canonical_identity,
+        "site_name": site_name,
+        "brand_terms": brand_terms,
+        "generator": generator,
+        "headings_h1": headings_h1,
+        "headings_h2": headings_h2,
+        "nav_text": nav_text,
+        "homepage_fetch_status": _clean_signal_text(site.get("homepage_fetch_status") or site_profile.get("homepage_fetch_status")),
+        "homepage_source": _clean_signal_text(site.get("homepage_source") or site_profile.get("homepage_source")),
+    }
+    health_access = {
+        "fetch_status": _clean_signal_text(metadata.get("fetch_status")),
         "link_health": link_health,
-        "original_folder_path": bookmark.get("original_folder_path", []),
+        "quality_facets": _as_text_list(quality_facets),
+        "fetch_context": metadata.get("fetch_context", {}) if isinstance(metadata.get("fetch_context"), dict) else {},
+        "trusted_override": bool(link_health.get("trusted_override")),
+        "review_required": bool(link_health.get("review_required", False)),
+        "status_code": metadata.get("status_code"),
+    }
+    context_time = {
+        "time_bucket": time_bucket,
+        "original_folder_path": list(bookmark.get("original_folder_path", []) or []),
+    }
+
+    return {
+        "schema_version": SIGNAL_PACK_SCHEMA_VERSION,
+        "identity": identity,
+        "content": content,
+        "structure": structure,
+        "health_access": health_access,
+        "context_time": context_time,
+        "preferred_title": content["preferred_title"],
+        "preferred_description": content["preferred_description"],
+        "semantic_text": content["semantic_text"],
+        "main_text": content["main_text"],
+        "title_candidates": content["title_candidates"],
+        "description_candidates": content["description_candidates"],
+        "keywords_text": content["keywords_text"],
+        "page_type_hints": structure["page_type_hints"],
+        "site_type_candidates": structure["site_type_candidates"],
+        "schema_types": structure["schema_types"],
+        "generator": structure["generator"],
+        "code_languages": content["code_languages"],
+        "resource_facets": structure["resource_facets"],
+        "source_facets": structure["source_facets"],
+        "quality_facets": health_access["quality_facets"],
+        "language": content["language"],
+        "time_bucket": context_time["time_bucket"],
+        "canonical_identity": identity["canonical_identity"],
+        "link_health": health_access["link_health"],
+        "original_folder_path": context_time["original_folder_path"],
     }
 
 
@@ -434,6 +639,7 @@ def pipeline_generated_paths(config: "PipelineConfig") -> dict[str, list[Path]]:
         paths.clustering_file,
         paths.html_output,
         paths.log_file,
+        paths.signal_audit_report_file,
     ]
     directories = [paths.reports_dir]
     return {
@@ -466,6 +672,7 @@ class PipelineConfig:
             review_report_file=_resolve_path(raw.get("output", {}).get("review_report_file"), reports_dir / "review_queue.json", self.base_dir),
             rule_suggestions_report_file=_resolve_path(raw.get("output", {}).get("rule_suggestions_report_file"), reports_dir / "rule_suggestions.json", self.base_dir),
             quality_report_file=_resolve_path(raw.get("output", {}).get("quality_report_file"), reports_dir / "quality_report.json", self.base_dir),
+            signal_audit_report_file=_resolve_path(raw.get("output", {}).get("signal_audit_report_file"), reports_dir / "signal_audit.json", self.base_dir),
         )
         proxy_options = raw.get("fetch_options", {}).get("proxy", {})
         review_policy = raw.get("fetch_options", {}).get("review_policy", {})

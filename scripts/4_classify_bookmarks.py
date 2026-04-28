@@ -10,36 +10,24 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-
-def metadata_texts(metadata: dict) -> dict:
-    page = metadata.get("page_signals", {})
-    site = metadata.get("site_signals", {})
-    profile = metadata.get("site_profile", {})
-    page_profile = profile.get("page", {}) if isinstance(profile, dict) else {}
-    site_profile = profile.get("site", {}) if isinstance(profile, dict) else {}
-    return {
-        "title": page.get("og:title") or page_profile.get("og:title") or page.get("twitter:title") or page_profile.get("twitter:title") or metadata.get("title") or page.get("title") or page_profile.get("title") or "",
-        "description": page.get("og:description") or page_profile.get("og:description") or page.get("twitter:description") or page_profile.get("twitter:description") or metadata.get("description") or page.get("description") or page_profile.get("description") or "",
-        "keywords": metadata.get("keywords") or page.get("keywords") or page_profile.get("keywords") or "",
-        "h1": metadata.get("h1") or page.get("h1") or page_profile.get("h1") or "",
-        "content_preview": page.get("main_text_preview") or page_profile.get("main_text_preview") or metadata.get("content_preview") or page.get("content_preview") or page_profile.get("content_preview") or "",
-        "page_type_hints": " ".join(page.get("page_type_hints") or page_profile.get("page_type_hints") or []),
-        "site_type_candidates": " ".join(site.get("site_type_candidates") or site_profile.get("site_type_candidates") or []),
-        "schema_types": " ".join(page.get("schema_types") or page_profile.get("schema_types") or []),
-        "brand_terms": " ".join(site.get("brand_terms") or site_profile.get("brand_terms") or []),
-        "site_name": site.get("site_name") or site_profile.get("site_name") or page.get("og:site_name") or page_profile.get("og:site_name") or "",
-    }
-
-
 from common import (
+    CLASSIFIED_OUTPUT_SCHEMA_VERSION,
     DEFAULT_GENERIC_PLATFORM_DOMAINS,
+    FETCH_OUTPUT_SCHEMA_VERSION,
     GENERIC_PLATFORM_TOKENS,
+    SOURCE_LIKE_TOPIC_TOKENS,
     build_parser,
     build_signal_pack,
     configure_logging,
     ensure_parent,
+    flatten_signal_pack,
     is_generic_platform_domain,
+    is_source_like_topic_token,
     load_config_from_args,
+    normalize_topic_token,
+    require_payload_schema,
+    signal_family_names,
+    signal_pack_sections,
 )
 
 
@@ -50,6 +38,48 @@ TOKEN_STOPWORDS = {
     "product", "tool", "tools", "general", "read", "free", "download", "downloads", "file", "files",
     "的", "了", "和", "是", "在", "用", "教程", "指南", "文档", "文章", "首页", "官网", "页面",
 }
+
+
+def signal_text_fields(bookmark: dict[str, Any]) -> dict[str, str]:
+    signal_pack = bookmark.get("signal_pack") or build_signal_pack(bookmark)
+    sections = signal_pack_sections(signal_pack)
+    identity = sections["identity"]
+    content = sections["content"]
+    structure = sections["structure"]
+    health_access = sections["health_access"]
+    context_time = sections["context_time"]
+    return {
+        "name": str(bookmark.get("name", "") or ""),
+        "title": " ".join(content.get("title_candidates") or []) or str(content.get("preferred_title", "") or ""),
+        "h1": " ".join(structure.get("headings_h1") or []),
+        "description": str(content.get("preferred_description", "") or ""),
+        "keywords": str(content.get("keywords_text", "") or ""),
+        "content_preview": str(content.get("main_text", "") or ""),
+        "site_profile": " ".join(
+            part
+            for part in (
+                structure.get("site_name", ""),
+                " ".join(structure.get("brand_terms") or []),
+                " ".join(structure.get("site_type_candidates") or []),
+                " ".join(structure.get("page_type_hints") or []),
+                " ".join(structure.get("schema_types") or []),
+            )
+            if part
+        ),
+        "semantic_text": str(content.get("semantic_text", "") or ""),
+        "schema_types": " ".join(structure.get("schema_types") or []),
+        "page_type_hints": " ".join(structure.get("page_type_hints") or []),
+        "site_type_candidates": " ".join(structure.get("site_type_candidates") or []),
+        "source_facets": " ".join(structure.get("source_facets") or []),
+        "site_name": str(structure.get("site_name", "") or ""),
+        "brand_terms": " ".join(structure.get("brand_terms") or []),
+        "language": str(content.get("language", "") or ""),
+        "folder_path": " / ".join(context_time.get("original_folder_path") or []),
+        "url": str(bookmark.get("url", "") or ""),
+        "domain": str(identity.get("domain", "") or bookmark.get("domain", "") or ""),
+        "url_path": "/" + "/".join(identity.get("path_segments") or []),
+        "fetch_status": str(health_access.get("fetch_status", "") or ""),
+    }
 
 
 def merge_rule_payload(base: Any, override: Any) -> Any:
@@ -102,6 +132,12 @@ class BookmarkClassifier:
         self.quality_signal_rules = facets.get("quality_signals") or self.rules.get("quality_signal_rules", {})
         self.dynamic_topic_rules = self.rules.get("dynamic_topic_rules", {})
         self.cluster_hint_limit = self.dynamic_topic_rules.get("cluster_hint_limit", 12)
+        configured_blocked_tokens = {
+            normalize_topic_token(item)
+            for item in self.dynamic_topic_rules.get("blocked_tokens", [])
+            if normalize_topic_token(item)
+        }
+        self.source_like_topic_tokens = set(SOURCE_LIKE_TOPIC_TOKENS) | configured_blocked_tokens
         self.generic_platform_domains = {
             item.lower()
             for item in self.rules.get("generic_platform_domains", DEFAULT_GENERIC_PLATFORM_DOMAINS)
@@ -144,46 +180,14 @@ class BookmarkClassifier:
         key = self._generic_platform_token_key(self._normalize_label(value))
         return key in GENERIC_PLATFORM_TOKENS
 
+    def _is_source_like_topic_token(self, value: str) -> bool:
+        return is_source_like_topic_token(value, self.source_like_topic_tokens)
+
     def _collect_text_fields(self, bookmark: dict) -> dict[str, str]:
-        metadata = bookmark.get("metadata", {})
-        normalized = metadata_texts(metadata)
-        signal_pack = bookmark.get("signal_pack") or build_signal_pack(bookmark)
-        folder_path = " / ".join(bookmark.get("original_folder_path", []))
-        parsed = urlparse(bookmark.get("url", ""))
-        site_profile = metadata.get("site_profile", "")
-        if isinstance(site_profile, dict):
-            site_profile = " ".join(
-                str(part)
-                for part in (
-                    normalized["site_name"],
-                    normalized["brand_terms"],
-                    normalized["site_type_candidates"],
-                    normalized["page_type_hints"],
-                    normalized["schema_types"],
-                )
-                if part
-            )
-        return {
-            "name": bookmark.get("name", ""),
-            "title": " ".join(signal_pack.get("title_candidates") or []) or signal_pack.get("preferred_title") or normalized["title"],
-            "h1": normalized["h1"],
-            "description": signal_pack.get("preferred_description") or normalized["description"],
-            "keywords": normalized["keywords"],
-            "content_preview": signal_pack.get("main_text") or normalized["content_preview"],
-            "site_profile": site_profile,
-            "semantic_text": signal_pack.get("semantic_text", ""),
-            "schema_types": " ".join(signal_pack.get("schema_types", [])),
-            "page_type_hints": " ".join(signal_pack.get("page_type_hints", [])),
-            "site_type_candidates": " ".join(signal_pack.get("site_type_candidates", [])),
-            "source_facets": " ".join(signal_pack.get("source_facets", [])),
-            "folder_path": folder_path,
-            "url": bookmark.get("url", ""),
-            "domain": bookmark.get("domain", ""),
-            "url_path": parsed.path or "",
-        }
+        return signal_text_fields(bookmark)
 
     def calculate_domain_score(self, bookmark: dict, category_rules: dict) -> int:
-        domain = bookmark.get("domain", "").lower()
+        domain = self._collect_text_fields(bookmark)["domain"].lower()
         for pattern in category_rules.get("domains", []):
             normalized = pattern.lower()
             if domain == normalized or domain.endswith(f".{normalized}"):
@@ -191,24 +195,22 @@ class BookmarkClassifier:
         return 0
 
     def calculate_keyword_score(self, bookmark: dict, category_rules: dict) -> int:
-        metadata = metadata_texts(bookmark.get("metadata", {}))
-        signal_pack = bookmark.get("signal_pack") or build_signal_pack(bookmark)
+        text_fields = self._collect_text_fields(bookmark)
         text = " ".join([
-            " ".join(signal_pack.get("title_candidates") or []),
-            signal_pack.get("preferred_title", ""),
-            signal_pack.get("preferred_description", ""),
-            metadata["keywords"],
-            metadata["site_name"],
-            metadata["brand_terms"],
-            signal_pack.get("language", ""),
+            text_fields["title"],
+            text_fields["description"],
+            text_fields["keywords"],
+            text_fields["site_name"],
+            text_fields["brand_terms"],
+            text_fields["language"],
         ])
         score = sum(20 for keyword in category_rules.get("keywords", []) if self._contains_keyword(text, keyword))
         return min(score, 100)
 
     def calculate_title_score(self, bookmark: dict, category_rules: dict) -> int:
-        metadata = metadata_texts(bookmark.get("metadata", {}))
         signal_pack = bookmark.get("signal_pack") or build_signal_pack(bookmark)
-        candidates = list(signal_pack.get("title_candidates") or []) + [metadata["title"], metadata["h1"], metadata["site_name"]]
+        text_fields = self._collect_text_fields(bookmark)
+        candidates = list(signal_pack.get("title_candidates") or []) + [text_fields["title"], text_fields["h1"], text_fields["site_name"]]
         for pattern in category_rules.get("title_patterns", []):
             if any(re.search(pattern, candidate, re.IGNORECASE) for candidate in candidates if candidate):
                 return 80
@@ -222,16 +224,15 @@ class BookmarkClassifier:
         return 0
 
     def calculate_content_score(self, bookmark: dict, category_rules: dict) -> int:
-        metadata = metadata_texts(bookmark.get("metadata", {}))
-        signal_pack = bookmark.get("signal_pack") or build_signal_pack(bookmark)
+        text_fields = self._collect_text_fields(bookmark)
         content = " ".join([
-            signal_pack.get("semantic_text", ""),
-            metadata["description"],
-            metadata["h1"],
-            metadata["content_preview"],
-            metadata["page_type_hints"],
-            metadata["site_type_candidates"],
-            metadata["schema_types"],
+            text_fields["semantic_text"],
+            text_fields["description"],
+            text_fields["h1"],
+            text_fields["content_preview"],
+            text_fields["page_type_hints"],
+            text_fields["site_type_candidates"],
+            text_fields["schema_types"],
         ])
         score = sum(10 for keyword in category_rules.get("keywords", []) if self._contains_keyword(content, keyword))
         return min(score, 80)
@@ -373,6 +374,8 @@ class BookmarkClassifier:
                 continue
             if generic_platform and self._is_generic_platform_token(normalized):
                 continue
+            if self._is_source_like_topic_token(normalized):
+                continue
             if len(normalized) < 4 and normalized not in allowed_short:
                 continue
             if normalized in known_topic_tokens:
@@ -380,6 +383,8 @@ class BookmarkClassifier:
             if normalized.isdigit():
                 continue
             label = self._title_case_token(token.strip("-_."))
+            if self._is_source_like_topic_token(label):
+                continue
             item = candidates.setdefault(label.lower(), {"topic": label, "score": 0, "sources": set()})
             item["score"] += 2 if source in {"site_profile", "title", "name"} else 1
             item["sources"].add(source)
@@ -474,6 +479,8 @@ class BookmarkClassifier:
             lowered = normalized.lower()
             if not lowered or lowered in TOKEN_STOPWORDS or lowered.isdigit():
                 continue
+            if self._is_source_like_topic_token(normalized):
+                continue
             if len(lowered) < 4 and lowered not in allowed_short:
                 continue
             tokens.append(self._title_case_token(normalized))
@@ -486,19 +493,22 @@ class BookmarkClassifier:
         dynamic_candidates: list[dict[str, Any]],
     ) -> list[str]:
         text_fields = self._collect_text_fields(bookmark)
-        metadata = metadata_texts(bookmark.get("metadata", {}))
         generic_platform = self._is_generic_platform_bookmark(bookmark)
         hints: list[str] = []
 
         for candidate in dynamic_candidates[:6]:
             hints.append(candidate["topic"])
 
-        site_name = metadata.get("site_name", "").strip()
-        if site_name and not (generic_platform and self._is_generic_platform_token(site_name)):
+        site_name = text_fields["site_name"].strip()
+        if (
+            site_name
+            and not self._is_source_like_topic_token(site_name)
+            and not (generic_platform and self._is_generic_platform_token(site_name))
+        ):
             hints.append(site_name)
 
         for value in (
-            metadata.get("brand_terms", ""),
+            text_fields["brand_terms"],
             text_fields["name"],
             text_fields["title"],
             text_fields["h1"],
@@ -523,6 +533,8 @@ class BookmarkClassifier:
                 continue
             if generic_platform and self._is_generic_platform_token(normalized):
                 continue
+            if self._is_source_like_topic_token(normalized):
+                continue
             marker = normalized.lower()
             if marker in seen:
                 continue
@@ -532,9 +544,183 @@ class BookmarkClassifier:
                 break
         return deduped
 
+    @staticmethod
+    def _mark_signal_usage(families: set[str], fields: set[str], signal_fields: list[str]) -> None:
+        fields.update(signal_fields)
+        families.update(field.split(".", 1)[0] for field in signal_fields)
+
+    def _score_signal_fields(self, signal_name: str) -> list[str]:
+        return {
+            "domain": ["identity.domain"],
+            "keywords": [
+                "content.title_candidates",
+                "content.preferred_title",
+                "content.preferred_description",
+                "content.keywords_text",
+                "content.language",
+                "structure.site_name",
+                "structure.brand_terms",
+            ],
+            "title": [
+                "content.title_candidates",
+                "structure.headings_h1",
+                "structure.site_name",
+            ],
+            "content": [
+                "content.semantic_text",
+                "content.preferred_description",
+                "content.main_text",
+                "structure.page_type_hints",
+                "structure.site_type_candidates",
+                "structure.schema_types",
+            ],
+            "folder": ["context_time.original_folder_path"],
+        }.get(signal_name, [])
+
+    def _resource_signal_fields(self, signal_name: str) -> list[str]:
+        return {
+            "structured_facet": ["structure.resource_facets"],
+            "domain": ["identity.domain"],
+            "url": ["identity.path_segments"],
+            "keyword": ["content.semantic_text", "content.keywords_text"],
+            "title": ["content.title_candidates", "structure.headings_h1"],
+            "extension": ["identity.path_segments"],
+        }.get(signal_name, [])
+
+    def _dynamic_source_fields(self, source_name: str) -> list[str]:
+        return {
+            "site_profile": [
+                "structure.site_name",
+                "structure.brand_terms",
+                "structure.site_type_candidates",
+                "structure.page_type_hints",
+                "structure.schema_types",
+            ],
+            "title": ["content.title_candidates"],
+            "name": ["identity.saved_title"],
+            "keywords": ["content.keywords_text"],
+            "url_path": ["identity.path_segments"],
+            "domain": ["identity.domain", "identity.registrable_domain"],
+        }.get(source_name, [])
+
+    def _collect_signal_usage(
+        self,
+        topic_scores: list[dict[str, Any]],
+        resource_type_evidence: list[dict[str, Any]],
+        dynamic_candidates: list[dict[str, Any]],
+        quality_signals: list[str],
+        confirmation_bucket: str,
+        review_required: bool,
+        link_health: dict[str, Any],
+    ) -> tuple[list[str], list[str]]:
+        families: set[str] = set()
+        fields: set[str] = set()
+        for item in topic_scores[:2]:
+            for evidence in item.get("evidence", []):
+                self._mark_signal_usage(families, fields, self._score_signal_fields(str(evidence.get("signal") or "")))
+        for evidence in resource_type_evidence:
+            self._mark_signal_usage(families, fields, self._resource_signal_fields(str(evidence.get("signal") or "")))
+        for candidate in dynamic_candidates[:3]:
+            for source in candidate.get("sources", []):
+                self._mark_signal_usage(families, fields, self._dynamic_source_fields(str(source)))
+        if quality_signals:
+            self._mark_signal_usage(
+                families,
+                fields,
+                [
+                    "structure.resource_facets",
+                ],
+            )
+        if confirmation_bucket in {"fetch_blocked", "low_confidence", "rule_gap"} or review_required:
+            self._mark_signal_usage(
+                families,
+                fields,
+                [
+                    "health_access.fetch_status",
+                    "health_access.link_health",
+                    "health_access.review_required",
+                    "health_access.trusted_override",
+                    "health_access.fetch_context",
+                ],
+            )
+        if link_health.get("trusted_override"):
+            self._mark_signal_usage(families, fields, ["health_access.trusted_override"])
+        return sorted(families), sorted(fields)
+
+    def _build_top_decision_drivers(
+        self,
+        rule_candidates: list[dict[str, Any]],
+        resource_type: str,
+        resource_type_evidence: list[dict[str, Any]],
+        dynamic_candidates: list[dict[str, Any]],
+        review_required: bool,
+        confirmation_bucket: str,
+    ) -> list[dict[str, Any]]:
+        drivers: list[dict[str, Any]] = []
+        if rule_candidates:
+            top_rule = rule_candidates[0]
+            signal_fields = sorted(
+                {
+                    field
+                    for evidence in top_rule.get("evidence", [])
+                    for field in self._score_signal_fields(str(evidence.get("signal") or ""))
+                }
+            )
+            drivers.append(
+                {
+                    "driver": "rule_category",
+                    "summary": f"{top_rule['category']} ({top_rule['total']})",
+                    "signal_fields": signal_fields,
+                }
+            )
+        if resource_type_evidence:
+            signal_fields = sorted(
+                {
+                    field
+                    for evidence in resource_type_evidence
+                    for field in self._resource_signal_fields(str(evidence.get("signal") or ""))
+                }
+            )
+            drivers.append(
+                {
+                    "driver": "resource_type",
+                    "summary": resource_type,
+                    "signal_fields": signal_fields,
+                }
+            )
+        if dynamic_candidates:
+            signal_fields = sorted(
+                {
+                    field
+                    for source in dynamic_candidates[0].get("sources", [])
+                    for field in self._dynamic_source_fields(str(source))
+                }
+            )
+            drivers.append(
+                {
+                    "driver": "open_topic_candidate",
+                    "summary": dynamic_candidates[0]["topic"],
+                    "signal_fields": signal_fields,
+                }
+            )
+        if review_required:
+            drivers.append(
+                {
+                    "driver": "review_gate",
+                    "summary": confirmation_bucket,
+                    "signal_fields": [
+                        "health_access.fetch_status",
+                        "health_access.link_health",
+                        "health_access.review_required",
+                    ],
+                }
+            )
+        return drivers[:4]
+
     def classify_bookmark(self, bookmark: dict) -> dict[str, Any]:
-        link_health = bookmark.get("metadata", {}).get("link_health", {})
         signal_pack = bookmark.get("signal_pack") or build_signal_pack(bookmark)
+        signal_sections = signal_pack_sections(signal_pack)
+        link_health = signal_sections["health_access"].get("link_health", {})
         topic_scores = []
         for category_name, category_rules in self.categories.items():
             scored = self._score_category(bookmark, category_name, category_rules)
@@ -561,10 +747,14 @@ class BookmarkClassifier:
         cluster_hints = self._extract_cluster_hints(bookmark, topic_scores, dynamic_candidates)
         quality_signals = self._infer_quality_signals(bookmark, topic_scores, resource_type)
         top_score = topic_scores[0]["total"] if topic_scores else 0.0
-        rule_confidence = self._rule_confidence(topic_scores)
+        runner_up_score = topic_scores[1]["total"] if len(topic_scores) > 1 else 0.0
+        raw_rule_confidence = self._rule_confidence(topic_scores)
+        rule_confidence = raw_rule_confidence
         review_required = bool(link_health.get("review_required"))
+        review_penalty_applied = False
         if review_required and not link_health.get("trusted_override"):
             rule_confidence = min(rule_confidence, 0.45)
+            review_penalty_applied = rule_confidence != raw_rule_confidence
             quality_signals = sorted(set(quality_signals + ["待审阅"]))
         auto_assign_confidence = float(self.scoring.get("auto_assign_confidence", 0.55))
         if rule_confidence < auto_assign_confidence:
@@ -572,13 +762,73 @@ class BookmarkClassifier:
             primary_topics = []
             secondary_topics = []
             topic_labels = []
+        fetch_status = str(signal_sections["health_access"].get("fetch_status") or "")
         needs_confirmation = (
             fallback_category == self.default_category
             or top_score < self.scoring["min_score"]
             or rule_confidence < auto_assign_confidence
         )
+        needs_confirmation_reasons = []
+        if review_required and not link_health.get("trusted_override"):
+            needs_confirmation_reasons.append("fetch_review_required")
+        if fallback_category == self.default_category:
+            needs_confirmation_reasons.append("default_category_fallback")
+        if top_score < self.scoring["min_score"]:
+            needs_confirmation_reasons.append("score_below_min")
+        if rule_confidence < auto_assign_confidence:
+            needs_confirmation_reasons.append("low_rule_confidence")
+        if dynamic_candidates:
+            needs_confirmation_reasons.append("open_topic_candidates_present")
+        if fetch_status and fetch_status != "success" and fallback_category == self.default_category:
+            needs_confirmation_reasons.append("fetch_limited_signal")
+        if (
+            (fetch_status == "success" or not fetch_status)
+            and not review_required
+            and fallback_category == self.default_category
+            and dynamic_candidates
+        ):
+            needs_confirmation_reasons.append("rule_coverage_gap_on_successful_fetch")
+        if review_required and fetch_status != "success":
+            confirmation_bucket = "fetch_blocked"
+        elif (
+            fallback_category == self.default_category
+            and not review_required
+            and (fetch_status == "success" or not fetch_status)
+            and dynamic_candidates
+        ):
+            confirmation_bucket = "rule_gap"
+        else:
+            confirmation_bucket = "low_confidence"
         review_category = link_health.get("reason_label")
         review_reason_code = link_health.get("reason_code")
+        used_signal_families, used_signal_fields = self._collect_signal_usage(
+            topic_scores,
+            resource_type_evidence,
+            dynamic_candidates,
+            quality_signals,
+            confirmation_bucket,
+            review_required,
+            link_health,
+        )
+        top_decision_drivers = self._build_top_decision_drivers(
+            rule_candidates,
+            resource_type,
+            resource_type_evidence,
+            dynamic_candidates,
+            review_required,
+            confirmation_bucket,
+        )
+        confidence_components = {
+            "top_score": round(top_score, 2),
+            "runner_up_score": round(runner_up_score, 2),
+            "score_margin": round(max(top_score - runner_up_score, 0.0), 2),
+            "confirm_threshold": float(self.scoring.get("confirm_threshold", 25)),
+            "auto_assign_confidence": auto_assign_confidence,
+            "raw_rule_confidence": raw_rule_confidence,
+            "final_rule_confidence": rule_confidence,
+            "strong_rule_evidence": bool(topic_scores and self._is_strong_rule_evidence(topic_scores[0])),
+            "review_penalty_applied": review_penalty_applied,
+        }
         classification_evidence = {
             "topic_scores": topic_scores[:8],
             "resource_type": resource_type_evidence,
@@ -589,13 +839,37 @@ class BookmarkClassifier:
             "rule_roots": rule_roots,
             "original_folder_path": bookmark.get("original_folder_path", []),
             "signal_pack": {
-                "preferred_title": signal_pack.get("preferred_title"),
-                "preferred_description": signal_pack.get("preferred_description"),
-                "resource_facets": signal_pack.get("resource_facets", []),
-                "language": signal_pack.get("language"),
-                "time_bucket": signal_pack.get("time_bucket", {}),
-                "canonical_identity": signal_pack.get("canonical_identity"),
+                "schema_version": signal_pack.get("schema_version"),
+                "families": {
+                    "identity": {
+                        "domain": signal_sections["identity"].get("domain"),
+                        "registrable_domain": signal_sections["identity"].get("registrable_domain"),
+                        "canonical_identity": signal_sections["identity"].get("canonical_identity"),
+                    },
+                    "content": {
+                        "preferred_title": signal_sections["content"].get("preferred_title"),
+                        "preferred_description": signal_sections["content"].get("preferred_description"),
+                        "keywords_text": signal_sections["content"].get("keywords_text"),
+                    },
+                    "structure": {
+                        "resource_facets": signal_sections["structure"].get("resource_facets", []),
+                        "site_name": signal_sections["structure"].get("site_name"),
+                        "page_type_hints": signal_sections["structure"].get("page_type_hints", []),
+                        "site_type_candidates": signal_sections["structure"].get("site_type_candidates", []),
+                    },
+                    "health_access": {
+                        "fetch_status": signal_sections["health_access"].get("fetch_status"),
+                        "review_required": signal_sections["health_access"].get("review_required"),
+                    },
+                    "context_time": {
+                        "time_bucket": signal_sections["context_time"].get("time_bucket", {}),
+                    },
+                },
+                "used_families": used_signal_families,
+                "used_fields": used_signal_fields,
             },
+            "top_decision_drivers": top_decision_drivers,
+            "confidence_components": confidence_components,
         }
 
         return {
@@ -612,9 +886,15 @@ class BookmarkClassifier:
             "rule_roots": rule_roots,
             "rule_confidence": rule_confidence,
             "cluster_hints": cluster_hints,
+            "used_signal_families": used_signal_families,
+            "used_signal_fields": used_signal_fields,
+            "top_decision_drivers": top_decision_drivers,
+            "confidence_components": confidence_components,
             "classification_evidence": classification_evidence,
             "score": round(top_score, 2),
             "needs_confirmation": needs_confirmation,
+            "needs_confirmation_reasons": needs_confirmation_reasons,
+            "confirmation_bucket": confirmation_bucket,
             "review_required": review_required,
             "review_category": review_category,
             "review_reason_code": review_reason_code,
@@ -631,6 +911,11 @@ class BookmarkClassifier:
         confirm_needed = []
         folder_only_count = 0
         low_confidence_normal_category_count = 0
+        confirmation_reason_counts = Counter()
+        confirmation_bucket_counts = Counter()
+        tidy_breakdown = Counter()
+        used_signal_family_counts = Counter()
+        used_signal_field_counts = Counter()
 
         for bookmark in bookmarks:
             classified = bookmark.copy()
@@ -655,13 +940,23 @@ class BookmarkClassifier:
                 and classification.get("rule_confidence", 0.0) < float(self.scoring.get("auto_assign_confidence", 0.55))
             ):
                 low_confidence_normal_category_count += 1
+            used_signal_family_counts.update(classification.get("used_signal_families", []))
+            used_signal_field_counts.update(classification.get("used_signal_fields", []))
+            if classification["category"] == self.default_category:
+                fetch_status = str(classified.get("signal_pack", {}).get("health_access", {}).get("fetch_status") or "unknown")
+                tidy_breakdown[f"{fetch_status}|review={classification.get('review_required', False)}"] += 1
             if classification["needs_confirmation"]:
+                confirmation_reason_counts.update(classification.get("needs_confirmation_reasons", []))
+                confirmation_bucket_counts[classification.get("confirmation_bucket") or "unknown"] += 1
                 low_confidence_items.append(
                     {
                         "id": bookmark.get("id"),
                         "name": bookmark.get("name"),
                         "url": bookmark.get("url"),
                         "score": classification["score"],
+                        "fetch_status": classified.get("metadata", {}).get("fetch_status"),
+                        "confirmation_bucket": classification.get("confirmation_bucket"),
+                        "needs_confirmation_reasons": classification.get("needs_confirmation_reasons", []),
                         "primary_topics": classification["primary_topics"],
                         "open_topic_candidates": classification["open_topic_candidates"][:3],
                     }
@@ -684,6 +979,11 @@ class BookmarkClassifier:
             "confirm_needed_ids": [bm["id"] for bm in confirm_needed[:100]],
             "folder_only_classification_count": folder_only_count,
             "low_confidence_normal_category_count": low_confidence_normal_category_count,
+            "confirmation_reason_counts": dict(confirmation_reason_counts),
+            "confirmation_bucket_counts": dict(confirmation_bucket_counts),
+            "tidy_breakdown": dict(tidy_breakdown),
+            "used_signal_family_counts": dict(used_signal_family_counts),
+            "used_signal_field_counts": dict(used_signal_field_counts),
         }
         return results, stats, confirm_needed
 
@@ -700,6 +1000,11 @@ def export_confirmation_report(confirm_needed: list, report_file: Path) -> None:
                 "primary_topics": bm["classification"]["primary_topics"],
                 "resource_type": bm["classification"]["resource_type"],
                 "score": bm["classification"]["score"],
+                "fetch_status": bm.get("metadata", {}).get("fetch_status"),
+                "confirmation_bucket": bm["classification"].get("confirmation_bucket"),
+                "needs_confirmation_reasons": bm["classification"].get("needs_confirmation_reasons", []),
+                "open_topic_candidates": bm["classification"]["open_topic_candidates"][:3],
+                "top_decision_drivers": bm["classification"].get("top_decision_drivers", []),
                 "review_required": bm["classification"]["review_required"],
                 "review_category": bm["classification"]["review_category"],
             }
@@ -733,11 +1038,23 @@ def main() -> int:
         print(f"错误: 分类规则文件不存在: {rules_file}")
         return 1
 
-    bookmarks = json.loads(input_file.read_text(encoding="utf-8"))["bookmarks"]
+    try:
+        input_payload = require_payload_schema(
+            json.loads(input_file.read_text(encoding="utf-8")),
+            FETCH_OUTPUT_SCHEMA_VERSION,
+            "步骤4输入",
+            input_file,
+        )
+    except ValueError as exc:
+        print(f"错误: {exc}")
+        return 1
+
+    bookmarks = input_payload["bookmarks"]
     classifier = BookmarkClassifier(rules_file, config.classification_options, rules_override_file)
     classified_bookmarks, stats, confirm_needed = classifier.classify_all(bookmarks)
 
     output = {
+        "schema_version": CLASSIFIED_OUTPUT_SCHEMA_VERSION,
         "bookmarks": classified_bookmarks,
         "stats": {
             "total_bookmarks": len(classified_bookmarks),
