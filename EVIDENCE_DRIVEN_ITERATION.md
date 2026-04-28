@@ -12,9 +12,9 @@ Use this playbook when an agent needs to:
 - validate the project on a real Chrome bookmark export
 - preserve intermediate artifacts and runtime evidence
 - assess whether the pipeline behavior matches the design contract
-- convert observed output quality into concrete next-step improvements
+- convert observed output quality into concrete taxonomy, clustering, fetch, or report improvements
 
-This workflow treats the project as a running system first, then uses artifacts and metrics to drive code or rule changes.
+This workflow treats the project as a running system first, then uses artifacts and metrics to drive code or generated-taxonomy changes.
 
 ## When To Use
 
@@ -23,7 +23,7 @@ Use this workflow when any of the following are true:
 - the user asks whether the project actually works on a real bookmark export
 - the user wants quality assessment based on artifacts, reports, and logs
 - the change is behavior-sensitive and cannot be judged from unit tests alone
-- the agent needs to propose rule, clustering, report, or fetch improvements grounded in a real run
+- the agent needs to propose taxonomy, clustering, report, or fetch improvements grounded in a real run
 
 ## Core Principles
 
@@ -105,10 +105,10 @@ Start from `skill_config.json`, then rewrite all generated paths into the runtim
 - all reports
 - log file
 
-Keep rule file paths pointing at tracked repo files:
+Keep generated user taxonomy paths isolated in the runtime workspace:
 
-- `data/category_rules.json`
-- `data/category_rules_overrides.json`
+- `data/generated/user_taxonomy.json`
+- `data/generated/bookmark_taxonomy_assignments.json`
 
 Save the derived config as:
 
@@ -123,8 +123,8 @@ Save validation output into `runtime_logs/` before the real run.
 Commands:
 
 ```bash
-python3 -m py_compile scripts/common.py scripts/1_copy_bookmark.py scripts/2_parse_bookmarks.py scripts/3_fetch_webpage_info.py scripts/4_classify_bookmarks.py scripts/5_cluster_bookmarks.py scripts/6_generate_html.py scripts/reset_pipeline_state.py
-python3 -c "import json; [json.load(open(path)) for path in ['data/category_rules.json','data/category_rules_overrides.json','skill_config.json']]"
+python3 -m py_compile scripts/common.py scripts/1_copy_bookmark.py scripts/2_parse_bookmarks.py scripts/3_fetch_webpage_info.py scripts/4_classify_bookmarks.py scripts/5_cluster_bookmarks.py scripts/6_generate_html.py scripts/generate_taxonomy_bootstrap.py scripts/apply_taxonomy_response.py scripts/reset_pipeline_state.py
+python3 -c "import json; json.load(open('skill_config.json'))"
 pytest -q
 ```
 
@@ -200,6 +200,23 @@ Interpretation:
 - low direct-retry gain means proxy and direct paths see similar site behavior
 
 ### 8. Run Classify, Cluster, Generate Sequentially
+
+If the run has no usable `data/generated/user_taxonomy.json`, generate the
+bootstrap prompt before treating classification quality as final:
+
+```bash
+python3 scripts/generate_taxonomy_bootstrap.py --config /tmp/<run>/skill_config.runtime.json
+```
+
+Give `taxonomy_bootstrap_prompt.md` to the external model, save its strict JSON
+response as `data/generated/taxonomy_response.json` in the runtime workspace,
+then apply it:
+
+```bash
+python3 scripts/apply_taxonomy_response.py \
+  --config /tmp/<run>/skill_config.runtime.json \
+  --response /tmp/<run>/data/generated/taxonomy_response.json
+```
 
 Run in order:
 
@@ -281,7 +298,7 @@ Ask:
 - is `low_confidence_normal_category_count == 0`
 - how many items still land in `待整理`
 - among `待整理`, how many are fetch failures vs rule gaps vs low-confidence items
-- which `open_topic_candidates` repeat often enough to justify narrow rules
+- which `open_topic_candidates` repeat often enough to justify generated taxonomy aliases, title patterns, or assignments
 
 ### Clustering Layer
 
@@ -315,28 +332,33 @@ Ask:
 Latest validated real-input run:
 
 - source export: `data/bookmarks_2026_4_28.html`
-- input bookmarks: `1012`
-- duplicate URL groups: `199`
-- unique domains: `437`
+- input bookmarks: `1014`
+- duplicate URL groups: `92`
+- unique domains: `439`
 - fetch success: `745`
-- fetch fail: `45`
-- fetch review queue: `92`
-- trusted overrides: `175`
-- classify `待确认`: `276`
-- classify `待整理`: `279`
-- cluster count: `716`
-- discovery clusters: `28`
-- mixed clusters: `30`
+- fetch fail: `269`
+- fetch review queue: `269`
+- trusted overrides: `0`
+- generated taxonomy categories: `41`
+- generated cluster assignments: `371`
+- classify `待确认`: `470`
+- classify `待整理`: `407`
+- cluster count: `623`
+- discovery clusters: `1`
+- mixed clusters: `5`
+- generic-platform clusters: `235`
+- largest generic-platform cluster size: `11`
 
 Important interpretation:
 
-- the pipeline now works on real data
-- the main problem is no longer global fetch failure
+- the pipeline now works on real data without checked-in category rule files
+- generated user taxonomy materially improves discovery and mixed-cluster metrics
+- the main problem is no longer global fetch failure or hardcoded default taxonomy
 - remaining work is concentrated in:
-  - discovery naming noise
-  - generic-platform cluster naming quality
-  - rule gaps
+  - generated taxonomy coverage gaps
+  - generic-platform cluster naming and split quality
   - a small number of hotspot fetch domains
+  - making the bootstrap prompt easier for external models to answer consistently
 
 See `TODO_RUNTIME_FOLLOWUP.md` for the detailed continuation plan.
 
@@ -358,7 +380,7 @@ Do not spend another round re-implementing those solved items.
 If you are starting a new iteration today, prioritize:
 
 1. discovery and generic-platform cluster naming cleanup
-2. narrow rule additions for repeated successful `rule_gap` domains/topics
+2. generated taxonomy additions for repeated successful `rule_gap` domains/topics
 3. hotspot fetch investigation for remaining `review_queue` domains
 4. selective consumption of already-collected unused signals such as `status_code`, `nav_text`, and `code_languages`
 

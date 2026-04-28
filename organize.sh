@@ -8,6 +8,7 @@ CONFIG_FILE="${2:-skill_config.json}"
 OUTPUT_HTML="${OUTPUT_HTML:-output/organized_bookmarks.html}"
 CLEAR_FETCH_CACHE=false
 RESET_ALL=false
+BOOTSTRAP_TAXONOMY=false
 FETCH_ARGS=()
 
 for arg in "${@:3}"; do
@@ -17,6 +18,9 @@ for arg in "${@:3}"; do
       ;;
     --reset-all)
       RESET_ALL=true
+      ;;
+    --bootstrap-taxonomy)
+      BOOTSTRAP_TAXONOMY=true
       ;;
     *)
       FETCH_ARGS+=("$arg")
@@ -50,8 +54,19 @@ fi
 
 python3 scripts/1_copy_bookmark.py --config "${CONFIG_FILE}" --source "${BOOKMARK_FILE}"
 python3 scripts/2_parse_bookmarks.py --config "${CONFIG_FILE}"
-python3 scripts/3_fetch_webpage_info.py --config "${CONFIG_FILE}" "${FETCH_ARGS[@]}"
+if [ "${#FETCH_ARGS[@]}" -gt 0 ]; then
+  python3 scripts/3_fetch_webpage_info.py --config "${CONFIG_FILE}" "${FETCH_ARGS[@]}"
+else
+  python3 scripts/3_fetch_webpage_info.py --config "${CONFIG_FILE}"
+fi
 python3 scripts/4_classify_bookmarks.py --config "${CONFIG_FILE}"
+if [ "${BOOTSTRAP_TAXONOMY}" = true ]; then
+  python3 scripts/generate_taxonomy_bootstrap.py --config "${CONFIG_FILE}"
+  echo "✅ Taxonomy bootstrap 完成。"
+  echo "📋 请复制 output/reports/taxonomy_bootstrap_prompt.md 到外部 LLM。"
+  echo "📋 获得 JSON 后运行: python3 scripts/apply_taxonomy_response.py --config ${CONFIG_FILE} --response data/generated/taxonomy_response.json"
+  exit 0
+fi
 python3 scripts/5_cluster_bookmarks.py --config "${CONFIG_FILE}"
 python3 scripts/6_generate_html.py --config "${CONFIG_FILE}" --output "${OUTPUT_HTML}"
 

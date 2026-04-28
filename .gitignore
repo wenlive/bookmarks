@@ -39,8 +39,7 @@ env/
 # Project specific
 data/*.html
 data/*.json
-!data/category_rules.json
-!data/category_rules_overrides.json
+data/generated/
 bookmarks_*.html
 output/
 logs/

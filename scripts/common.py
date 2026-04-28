@@ -19,47 +19,23 @@ CLASSIFIED_OUTPUT_SCHEMA_VERSION = "classified_output/v2"
 CLUSTERING_OUTPUT_SCHEMA_VERSION = "clustering_output/v2"
 SIGNAL_AUDIT_SCHEMA_VERSION = "signal_audit/v1"
 SIGNAL_PACK_SCHEMA_VERSION = "signal_pack/v2"
+TAXONOMY_BOOTSTRAP_CLUSTERS_SCHEMA_VERSION = "taxonomy_bootstrap_clusters/v1"
+USER_TAXONOMY_RESPONSE_SCHEMA_VERSION = "user_taxonomy_response/v1"
+USER_TAXONOMY_SCHEMA_VERSION = "user_taxonomy/v1"
+BOOKMARK_TAXONOMY_ASSIGNMENTS_SCHEMA_VERSION = "bookmark_taxonomy_assignments/v1"
 DEFAULT_TRUSTED_ACCESS_POLICY = {
-    "enabled": True,
-    "domain_suffixes": [
-        "zhihu.com",
-        "csdn.net",
-        "github.com",
-        "gitbook.com",
-        "gitbook.io",
-    ],
-    "http_statuses": [403, 406, 429],
-    "allow_reason_codes": ["timeout", "certificate", "other_error"],
-    "domain_rules": [
-        {
-            "domain_suffixes": ["csdn.net", "csdn.com", "csdnimg.cn"],
-            "http_statuses": [403, 404, 406, 429, 451, 500, 502, 503, 504, 520, 521, 522, 523, 524],
-        },
-        {
-            "domain_suffixes": ["zhihu.com"],
-            "http_statuses": [403, 404, 406, 429, 451, 500, 502, 503, 504, 520, 521, 522, 523, 524],
-        },
-        {
-            "domain_suffixes": ["gitbook.com", "gitbook.io"],
-            "http_statuses": [403, 404, 406, 429, 451, 500, 502, 503, 504, 520, 521, 522, 523, 524],
-        },
-        {
-            "domain_suffixes": ["github.com"],
-            "http_statuses": [403, 406, 429, 451, 500, 502, 503, 504, 520, 521, 522, 523, 524],
-        },
-    ],
+    "enabled": False,
+    "domain_suffixes": [],
+    "http_statuses": [],
+    "allow_reason_codes": [],
+    "domain_rules": [],
 }
-DEFAULT_ROOT_GROUPS = [
-    {"name": "技术主题", "roots": ["数据库", "编程语言", "前端开发", "后端开发", "网络编程", "分布式系统", "消息队列", "云服务", "DevOps", "Linux系统", "操作系统", "安全", "机器学习", "算法与数据结构", "文件格式"]},
-    {"name": "工具与平台", "roots": ["开发工具", "实验项目", "公司资源"]},
-    {"name": "学习与资料", "roots": ["论文与研究", "阅读资料", "教育课程"]},
-    {"name": "个人与生活", "roots": ["个人服务", "娱乐"]},
-    {"name": "待整理", "roots": ["待整理", "其他/未分类"]},
-]
+DEFAULT_ROOT_GROUPS: list[dict[str, Any]] = []
 DEFAULT_DISPLAY_OPTIONS = {
     "max_depth": 3,
     "collapse_single_child": True,
     "prefer_human_labels": True,
+    "main_group_name": "主要主题",
     "fallback_group_name": "待整理",
     "discovery_root_name": "发现主题",
     "tidy_root_name": "待整理",
@@ -130,6 +106,93 @@ GENERIC_PLATFORM_TOKENS = {
     "details",
     "article",
     "weixin",
+}
+NOISY_TOPIC_TOKENS = {
+    re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", value.lower())
+    for value in {
+        "about",
+        "also",
+        "article",
+        "articles",
+        "blog",
+        "blogs",
+        "book",
+        "books",
+        "chapter",
+        "code",
+        "community",
+        "details",
+        "developers",
+        "documentation",
+        "download",
+        "downloads",
+        "feedback",
+        "gitcode",
+        "guide",
+        "home",
+        "homepage",
+        "index",
+        "latest",
+        "official",
+        "overview",
+        "page",
+        "pages",
+        "please",
+        "post",
+        "posts",
+        "provide",
+        "reference",
+        "repo",
+        "repository",
+        "research",
+        "saved",
+        "search",
+        "searches",
+        "source",
+        "stable",
+        "tool",
+        "tools",
+        "tutorial",
+        "user",
+        "webpage",
+        "wiki",
+        "atomgit",
+        "csdn博客",
+        "it技术",
+        "技术博客",
+        "下载app",
+        "代码托管",
+        "全球开发者",
+        "官方文档",
+        "官方网站",
+        "开源代码",
+        "开源社区",
+        "技术发表平台",
+        "仅提供信息存储服务",
+        "文档中心",
+        "会员",
+        "社区",
+        "知乎",
+        "简书",
+        "腾讯文档",
+        "在线文档",
+    }
+}
+WEAK_TOPIC_TOKENS = {
+    re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", value.lower())
+    for value in {
+        "ai",
+        "api",
+        "create",
+        "display",
+        "efficient",
+        "example",
+        "examples",
+        "method",
+        "native",
+        "phone",
+        "week",
+    }
 }
 SOURCE_LIKE_TOPIC_TOKENS = {
     re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", value.lower())
@@ -205,8 +268,8 @@ class PipelinePaths:
     classified_file: Path
     clustering_file: Path
     html_output: Path
-    rules_file: Path
-    rules_override_file: Path
+    user_taxonomy_file: Optional[Path]
+    bookmark_assignment_file: Optional[Path]
     reports_dir: Path
     log_file: Path
     duplicate_report_file: Path
@@ -216,6 +279,8 @@ class PipelinePaths:
     rule_suggestions_report_file: Path
     quality_report_file: Path
     signal_audit_report_file: Path
+    taxonomy_bootstrap_prompt_file: Path
+    taxonomy_bootstrap_clusters_file: Path
 
 
 class JsonFormatter(logging.Formatter):
@@ -231,8 +296,8 @@ DEFAULT_PATHS = {
     "classified_file": ROOT_DIR / "data" / "classified_bookmarks.json",
     "clustering_file": ROOT_DIR / "data" / "clustering_result.json",
     "html_output": ROOT_DIR / "output" / "organized_bookmarks.html",
-    "rules_file": ROOT_DIR / "data" / "category_rules.json",
-    "rules_override_file": ROOT_DIR / "data" / "category_rules_overrides.json",
+    "user_taxonomy_file": ROOT_DIR / "data" / "generated" / "user_taxonomy.json",
+    "bookmark_assignment_file": ROOT_DIR / "data" / "generated" / "bookmark_taxonomy_assignments.json",
     "reports_dir": ROOT_DIR / "output" / "reports",
     "log_file": ROOT_DIR / "logs" / "bookmarks_organizer.log",
     "duplicate_report_file": ROOT_DIR / "output" / "reports" / "duplicates.json",
@@ -242,6 +307,8 @@ DEFAULT_PATHS = {
     "rule_suggestions_report_file": ROOT_DIR / "output" / "reports" / "rule_suggestions.json",
     "quality_report_file": ROOT_DIR / "output" / "reports" / "quality_report.json",
     "signal_audit_report_file": ROOT_DIR / "output" / "reports" / "signal_audit.json",
+    "taxonomy_bootstrap_prompt_file": ROOT_DIR / "output" / "reports" / "taxonomy_bootstrap_prompt.md",
+    "taxonomy_bootstrap_clusters_file": ROOT_DIR / "output" / "reports" / "taxonomy_bootstrap_clusters.json",
 }
 
 
@@ -318,6 +385,51 @@ def is_source_like_topic_token(value: str, blocked_tokens: set[str] | None = Non
         return False
     tokens = blocked_tokens or SOURCE_LIKE_TOPIC_TOKENS
     return token in tokens or bool(re.fullmatch(r"(part|session|chapter)\d+", token))
+
+
+def _looks_like_generated_identifier(token: str) -> bool:
+    if len(token) >= 12 and re.fullmatch(r"[a-f0-9]+", token):
+        return True
+    if len(token) >= 8:
+        digit_count = sum(ch.isdigit() for ch in token)
+        if digit_count / len(token) >= 0.45:
+            return True
+    return False
+
+
+def _looks_like_platform_slogan(value: str) -> bool:
+    text = re.sub(r"\s+", "", value or "")
+    if not text:
+        return False
+    if re.fullmatch(r"([\u4e00-\u9fff]{2,4})你的\1", text):
+        return True
+    return bool(
+        len(text) >= 5
+        and any(marker in text for marker in ("平台", "社区", "官网", "文档中心", "官方网站", "在线文档", "下载app"))
+        and any(marker in text for marker in ("开发者", "开源", "技术", "代码", "创作", "用户", "文档"))
+    )
+
+
+def is_noisy_topic_token(value: str, blocked_tokens: set[str] | None = None) -> bool:
+    token = normalize_topic_token(value)
+    if not token:
+        return True
+    if token in NOISY_TOPIC_TOKENS:
+        return True
+    if token in GENERIC_PLATFORM_TOKENS:
+        return True
+    if is_source_like_topic_token(value, blocked_tokens):
+        return True
+    if _looks_like_generated_identifier(token):
+        return True
+    if _looks_like_platform_slogan(value):
+        return True
+    return False
+
+
+def is_weak_topic_token(value: str) -> bool:
+    token = normalize_topic_token(value)
+    return bool(token and token in WEAK_TOPIC_TOKENS)
 
 
 SCHEMA_TYPE_RESOURCE_FACETS = {
@@ -662,8 +774,8 @@ class PipelineConfig:
             classified_file=_resolve_path(raw.get("pipeline", {}).get("classified_file"), DEFAULT_PATHS["classified_file"], self.base_dir),
             clustering_file=_resolve_path(raw.get("pipeline", {}).get("clustering_file"), DEFAULT_PATHS["clustering_file"], self.base_dir),
             html_output=_resolve_path(raw.get("output", {}).get("html_file"), DEFAULT_PATHS["html_output"], self.base_dir),
-            rules_file=_resolve_path(raw.get("input", {}).get("rules_file"), DEFAULT_PATHS["rules_file"], self.base_dir),
-            rules_override_file=_resolve_path(raw.get("input", {}).get("rules_override_file"), DEFAULT_PATHS["rules_override_file"], self.base_dir),
+            user_taxonomy_file=_resolve_path(raw.get("input", {}).get("user_taxonomy_file"), DEFAULT_PATHS["user_taxonomy_file"], self.base_dir),
+            bookmark_assignment_file=_resolve_path(raw.get("input", {}).get("bookmark_assignment_file"), DEFAULT_PATHS["bookmark_assignment_file"], self.base_dir),
             reports_dir=reports_dir,
             log_file=_resolve_path(raw.get("logging", {}).get("file"), DEFAULT_PATHS["log_file"], self.base_dir),
             duplicate_report_file=_resolve_path(raw.get("output", {}).get("duplicate_report_file"), reports_dir / "duplicates.json", self.base_dir),
@@ -673,6 +785,8 @@ class PipelineConfig:
             rule_suggestions_report_file=_resolve_path(raw.get("output", {}).get("rule_suggestions_report_file"), reports_dir / "rule_suggestions.json", self.base_dir),
             quality_report_file=_resolve_path(raw.get("output", {}).get("quality_report_file"), reports_dir / "quality_report.json", self.base_dir),
             signal_audit_report_file=_resolve_path(raw.get("output", {}).get("signal_audit_report_file"), reports_dir / "signal_audit.json", self.base_dir),
+            taxonomy_bootstrap_prompt_file=_resolve_path(raw.get("output", {}).get("taxonomy_bootstrap_prompt_file"), reports_dir / "taxonomy_bootstrap_prompt.md", self.base_dir),
+            taxonomy_bootstrap_clusters_file=_resolve_path(raw.get("output", {}).get("taxonomy_bootstrap_clusters_file"), reports_dir / "taxonomy_bootstrap_clusters.json", self.base_dir),
         )
         proxy_options = raw.get("fetch_options", {}).get("proxy", {})
         review_policy = raw.get("fetch_options", {}).get("review_policy", {})
@@ -706,6 +820,13 @@ class PipelineConfig:
         self.clustering_options.pop("mode", None)
         self.clustering_options.setdefault("discovery_root_name", DEFAULT_DISPLAY_OPTIONS["discovery_root_name"])
         self.clustering_options.setdefault("root_groups", DEFAULT_ROOT_GROUPS)
+        if not self.clustering_options.get("root_groups") and self.paths.user_taxonomy_file and self.paths.user_taxonomy_file.exists():
+            try:
+                user_taxonomy = json.loads(self.paths.user_taxonomy_file.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                user_taxonomy = {}
+            if isinstance(user_taxonomy.get("root_groups"), list):
+                self.clustering_options["root_groups"] = user_taxonomy["root_groups"]
         display_options = dict(DEFAULT_DISPLAY_OPTIONS)
         display_options.update(self.clustering_options.get("display", {}))
         self.clustering_options["display"] = display_options

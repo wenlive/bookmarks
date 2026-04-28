@@ -20,12 +20,12 @@ The codebase is already on the information-flow version of the pipeline:
 - classification and clustering both emit decision evidence.
 - `signal_audit.json` tracks which collected signals are actually consumed.
 
-Latest real-input validation is documented in `TODO_RUNTIME_FOLLOWUP.md`. As of `2026-04-28`, the pipeline has been validated on a real `1012`-bookmark export and is operational on real data.
+Latest real-input validation is documented in `TODO_RUNTIME_FOLLOWUP.md`. As of `2026-04-28`, the pipeline has been validated on a real `1014`-bookmark export with generated user taxonomy and is operational on real data.
 
 ## Use This When
 
 - You have a Chrome-exported `bookmarks.html` file and want a cleaner importable HTML file.
-- You want technical bookmarks grouped by topic, resource type, and discovered themes.
+- You want bookmarks grouped by generated topics, resource type, and discovered themes.
 - You want broken or suspicious links preserved but mirrored into `待审阅`.
 - You want reports that identify fetch hotspots, rule gaps, mixed clusters, and unused signals.
 - You are an agent improving this project and need the current design contract before making changes.
@@ -192,13 +192,12 @@ Broken or suspicious links are not deleted. They remain in the normal hierarchy 
 generated HTML bookmark count >= original input bookmark count
 ```
 
-Default top-level groups:
+Default top-level groups are generated from the current run. With no user
+taxonomy, normal roots are grouped under `主要主题`; review and unresolved
+areas stay separate:
 
 ```text
-技术主题
-工具与平台
-学习与资料
-个人与生活
+主要主题
 待整理
 发现主题
 待审阅  # only when review items exist
@@ -210,7 +209,7 @@ Use `skill_config.json` as the operational config.
 
 Core sections:
 
-- `input`: source bookmark path and rule files
+- `input`: source bookmark path plus optional generated taxonomy/assignment files
 - `pipeline`: intermediate file paths
 - `output`: final HTML and report paths
 - `fetch_options`: concurrency, timeout, retry, cache, proxy, trusted-access policy
@@ -220,17 +219,39 @@ Core sections:
 
 When using an alternate config file, relative paths are resolved relative to that config file's directory.
 
-## Rule Files
+## Taxonomy Bootstrap
 
-- `data/category_rules.json`: shared default rules
-- `data/category_rules_overrides.json`: local or personal extensions
+The default pipeline no longer depends on checked-in category rule files. First runs
+use an empty topic taxonomy and produce open-topic candidates from `signal_pack/v2`.
 
-Rule improvement guidance:
+Generate a prompt for an external LLM:
+
+```bash
+./organize.sh data/bookmarks.html skill_config.json --bootstrap-taxonomy
+```
+
+Then place the LLM's strict JSON response in `data/generated/taxonomy_response.json`
+and apply it:
+
+```bash
+python3 scripts/apply_taxonomy_response.py --config skill_config.json --response data/generated/taxonomy_response.json
+```
+
+This writes `data/generated/user_taxonomy.json` and
+`data/generated/bookmark_taxonomy_assignments.json`; normal runs consume those files
+when they exist.
+
+Display grouping is data-tolerant: when `clustering_options.root_groups` is empty or
+`clustering_options.display.grouping_mode` is `auto`, the clusterer groups whatever
+root topics exist in the run under `主要主题`, while keeping `待整理` and `发现主题`
+separate.
+
+Taxonomy guidance:
 
 - add topic-specific domains only when the domain itself is topic-specific
 - prefer aliases, title patterns, and stable project/product tokens before broad domain rules
-- keep generic platform domains in `generic_platform_domains`, not in topic rules
-- validate rule additions with `rule_suggestions.json`, `quality_report.json`, and tests
+- keep broad source platforms out of topic domains
+- validate taxonomy additions with `taxonomy_bootstrap_clusters.json`, `quality_report.json`, and tests
 
 ## Run Modes
 
@@ -269,8 +290,8 @@ Remove all generated pipeline state and rebuild:
 Before committing code or rule changes:
 
 ```bash
-python3 -m py_compile scripts/common.py scripts/1_copy_bookmark.py scripts/2_parse_bookmarks.py scripts/3_fetch_webpage_info.py scripts/4_classify_bookmarks.py scripts/5_cluster_bookmarks.py scripts/6_generate_html.py scripts/reset_pipeline_state.py
-python3 -c "import json; [json.load(open(path)) for path in ['data/category_rules.json','data/category_rules_overrides.json','skill_config.json']]"
+python3 -m py_compile scripts/common.py scripts/1_copy_bookmark.py scripts/2_parse_bookmarks.py scripts/3_fetch_webpage_info.py scripts/4_classify_bookmarks.py scripts/5_cluster_bookmarks.py scripts/6_generate_html.py scripts/generate_taxonomy_bootstrap.py scripts/apply_taxonomy_response.py scripts/reset_pipeline_state.py
+python3 -c "import json; json.load(open('skill_config.json'))"
 pytest -q
 git diff --check
 ```

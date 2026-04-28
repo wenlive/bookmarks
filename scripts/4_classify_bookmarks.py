@@ -11,6 +11,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from common import (
+    BOOKMARK_TAXONOMY_ASSIGNMENTS_SCHEMA_VERSION,
     CLASSIFIED_OUTPUT_SCHEMA_VERSION,
     DEFAULT_GENERIC_PLATFORM_DOMAINS,
     FETCH_OUTPUT_SCHEMA_VERSION,
@@ -22,7 +23,9 @@ from common import (
     ensure_parent,
     flatten_signal_pack,
     is_generic_platform_domain,
+    is_noisy_topic_token,
     is_source_like_topic_token,
+    is_weak_topic_token,
     load_config_from_args,
     normalize_topic_token,
     require_payload_schema,
@@ -37,6 +40,96 @@ TOKEN_STOPWORDS = {
     "official", "reference", "documentation", "intro", "about", "index", "article", "posts", "post", "home",
     "product", "tool", "tools", "general", "read", "free", "download", "downloads", "file", "files",
     "的", "了", "和", "是", "在", "用", "教程", "指南", "文档", "文章", "首页", "官网", "页面",
+}
+
+
+DEFAULT_SCORING = {
+    "domain_weight": 30,
+    "keyword_weight": 40,
+    "title_weight": 20,
+    "folder_weight": 0,
+    "content_weight": 15,
+    "min_score": 15,
+    "confirm_threshold": 25,
+    "auto_assign_confidence": 0.55,
+    "confirm_confidence": 0.65,
+}
+
+
+DEFAULT_RESOURCE_TYPE_RULES = {
+    "文档": {
+        "domains": ["readthedocs.io", "developer.mozilla.org"],
+        "url_patterns": ["/docs", "/doc/", "/reference", "/manual", "/guide", "/learn"],
+        "keywords": ["documentation", "docs", "reference", "文档", "手册", "官方文档"],
+        "title_patterns": ["[Dd]ocumentation", "[Rr]eference", "文档", "手册"],
+    },
+    "博客": {
+        "domains": ["medium.com", "juejin.cn", "segmentfault.com", "csdn.net", "cnblogs.com", "infoq.cn", "dev.to"],
+        "url_patterns": ["/blog", "/posts", "/article"],
+        "keywords": ["blog", "博客", "article", "文章"],
+        "title_patterns": ["[Bb]log", "博客", "文章"],
+    },
+    "教程": {
+        "domains": [],
+        "url_patterns": ["/tutorial", "/getting-started", "/quickstart", "/how-to"],
+        "keywords": ["tutorial", "教程", "quickstart", "getting started", "入门", "实践"],
+        "title_patterns": ["[Tt]utorial", "教程", "入门", "Quickstart"],
+    },
+    "仓库": {
+        "domains": ["github.com", "gitlab.com", "gitee.com", "bitbucket.org"],
+        "url_patterns": ["/.+/.+"],
+        "keywords": ["repository", "repo", "仓库", "source code"],
+        "title_patterns": ["GitHub", "GitLab"],
+    },
+    "论文": {
+        "domains": ["arxiv.org", "acm.org", "ieee.org"],
+        "url_patterns": ["/abs/", "/pdf/"],
+        "keywords": ["paper", "论文", "research", "preprint"],
+        "title_patterns": ["[Pp]aper", "论文", "[Rr]esearch"],
+    },
+    "工具": {
+        "domains": [],
+        "url_patterns": ["/download", "/cli"],
+        "keywords": ["tool", "工具", "cli", "plugin", "extension"],
+        "title_patterns": ["[Tt]ool", "工具", "CLI"],
+    },
+}
+
+
+DEFAULT_INTENT_RULES = {
+    "学习": ["tutorial", "教程", "入门", "guide", "learn", "课程"],
+    "参考": ["reference", "documentation", "文档", "手册", "api"],
+    "下载": ["download", "release", "安装", "setup"],
+    "排障": ["troubleshoot", "debug", "debugging", "faq", "error", "故障", "排查"],
+}
+
+
+DEFAULT_QUALITY_SIGNAL_RULES = {
+    "官方": {"domains": [], "keywords": ["official", "官方"]},
+    "社区": {"domains": ["medium.com", "juejin.cn", "segmentfault.com", "csdn.net", "cnblogs.com", "dev.to"], "keywords": ["community", "社区"]},
+}
+
+
+DEFAULT_DYNAMIC_TOPIC_RULES = {
+    "allow_short_tokens": [],
+    "blocked_tokens": [],
+    "max_candidates": 8,
+    "cluster_hint_limit": 12,
+}
+
+
+DEFAULT_RULE_BUNDLE = {
+    "schema_version": "taxonomy_base/v1",
+    "categories": {},
+    "topics": {},
+    "default_category": "待整理",
+    "scoring": DEFAULT_SCORING,
+    "non_topic_categories": [],
+    "generic_platform_domains": sorted(DEFAULT_GENERIC_PLATFORM_DOMAINS),
+    "resource_type_rules": DEFAULT_RESOURCE_TYPE_RULES,
+    "intent_rules": DEFAULT_INTENT_RULES,
+    "quality_signal_rules": DEFAULT_QUALITY_SIGNAL_RULES,
+    "dynamic_topic_rules": DEFAULT_DYNAMIC_TOPIC_RULES,
 }
 
 
@@ -105,17 +198,27 @@ def merge_rule_payload(base: Any, override: Any) -> Any:
     return copy.deepcopy(override)
 
 
-def load_rule_bundle(rules_file: Path, overrides_file: Path | None = None) -> dict[str, Any]:
-    payload = json.loads(rules_file.read_text(encoding="utf-8"))
-    if overrides_file and overrides_file.exists():
-        override_payload = json.loads(overrides_file.read_text(encoding="utf-8"))
-        payload = merge_rule_payload(payload, override_payload)
+def _load_json_file(path: Path | None) -> dict[str, Any]:
+    if not path or not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def load_rule_bundle(user_taxonomy_file: Path | None = None) -> dict[str, Any]:
+    payload = copy.deepcopy(DEFAULT_RULE_BUNDLE)
+    if user_taxonomy_file and user_taxonomy_file.exists():
+        payload = merge_rule_payload(payload, _load_json_file(user_taxonomy_file))
     return payload
 
 
 class BookmarkClassifier:
-    def __init__(self, rules_file: Path, classification_options: dict | None = None, overrides_file: Path | None = None):
-        self.rules = load_rule_bundle(rules_file, overrides_file)
+    def __init__(
+        self,
+        classification_options: dict | None = None,
+        user_taxonomy_file: Path | None = None,
+        assignment_file: Path | None = None,
+    ):
+        self.rules = load_rule_bundle(user_taxonomy_file)
         self.categories = merge_rule_payload(
             self.rules.get("categories") or {},
             self.rules.get("topics") or {},
@@ -142,6 +245,21 @@ class BookmarkClassifier:
             item.lower()
             for item in self.rules.get("generic_platform_domains", DEFAULT_GENERIC_PLATFORM_DOMAINS)
         } or set(DEFAULT_GENERIC_PLATFORM_DOMAINS)
+        self.assignment_index = self._load_assignment_index(assignment_file)
+
+    @staticmethod
+    def _load_assignment_index(assignment_file: Path | None) -> dict[str, dict[str, Any]]:
+        payload = _load_json_file(assignment_file)
+        if not payload:
+            return {}
+        if payload.get("schema_version") != BOOKMARK_TAXONOMY_ASSIGNMENTS_SCHEMA_VERSION:
+            raise ValueError(
+                f"书签约束文件 schema_version 必须是 {BOOKMARK_TAXONOMY_ASSIGNMENTS_SCHEMA_VERSION}: {assignment_file}"
+            )
+        assignments = payload.get("assignments", {})
+        if not isinstance(assignments, dict):
+            raise ValueError(f"书签约束文件 assignments 必须是对象: {assignment_file}")
+        return assignments
 
     @staticmethod
     def _contains_keyword(text: str, keyword: str) -> bool:
@@ -182,6 +300,9 @@ class BookmarkClassifier:
 
     def _is_source_like_topic_token(self, value: str) -> bool:
         return is_source_like_topic_token(value, self.source_like_topic_tokens)
+
+    def _is_noisy_topic_token(self, value: str) -> bool:
+        return is_noisy_topic_token(value, self.source_like_topic_tokens)
 
     def _collect_text_fields(self, bookmark: dict) -> dict[str, str]:
         return signal_text_fields(bookmark)
@@ -374,7 +495,7 @@ class BookmarkClassifier:
                 continue
             if generic_platform and self._is_generic_platform_token(normalized):
                 continue
-            if self._is_source_like_topic_token(normalized):
+            if self._is_noisy_topic_token(normalized) or is_weak_topic_token(normalized):
                 continue
             if len(normalized) < 4 and normalized not in allowed_short:
                 continue
@@ -383,7 +504,7 @@ class BookmarkClassifier:
             if normalized.isdigit():
                 continue
             label = self._title_case_token(token.strip("-_."))
-            if self._is_source_like_topic_token(label):
+            if self._is_noisy_topic_token(label) or is_weak_topic_token(label):
                 continue
             item = candidates.setdefault(label.lower(), {"topic": label, "score": 0, "sources": set()})
             item["score"] += 2 if source in {"site_profile", "title", "name"} else 1
@@ -410,6 +531,31 @@ class BookmarkClassifier:
     def _category_leaf(topic: str) -> str:
         parts = [part for part in topic.split("/") if part]
         return parts[-1] if parts else topic
+
+    @staticmethod
+    def _assignment_confidence(value: Any) -> float:
+        if isinstance(value, (int, float)):
+            return max(0.0, min(float(value), 1.0))
+        return {"high": 0.95, "medium": 0.75, "low": 0.4}.get(str(value or "").lower(), 0.0)
+
+    def _bookmark_identity(self, bookmark: dict) -> str:
+        signal_pack = bookmark.get("signal_pack") or build_signal_pack(bookmark)
+        sections = signal_pack_sections(signal_pack)
+        return str(sections["identity"].get("canonical_identity") or bookmark.get("url") or "")
+
+    def _lookup_assignment(self, bookmark: dict) -> dict[str, Any] | None:
+        identity = self._bookmark_identity(bookmark)
+        if identity and identity in self.assignment_index:
+            assignment = dict(self.assignment_index[identity])
+            assignment["canonical_identity"] = identity
+            return assignment
+        normalized_url = normalize_topic_token(bookmark.get("url", ""))
+        for key, value in self.assignment_index.items():
+            if normalize_topic_token(key) == normalized_url:
+                assignment = dict(value)
+                assignment["canonical_identity"] = key
+                return assignment
+        return None
 
     def _is_strong_rule_evidence(self, score_item: dict[str, Any]) -> bool:
         return any(
@@ -479,7 +625,7 @@ class BookmarkClassifier:
             lowered = normalized.lower()
             if not lowered or lowered in TOKEN_STOPWORDS or lowered.isdigit():
                 continue
-            if self._is_source_like_topic_token(normalized):
+            if self._is_noisy_topic_token(normalized) or is_weak_topic_token(normalized):
                 continue
             if len(lowered) < 4 and lowered not in allowed_short:
                 continue
@@ -533,7 +679,7 @@ class BookmarkClassifier:
                 continue
             if generic_platform and self._is_generic_platform_token(normalized):
                 continue
-            if self._is_source_like_topic_token(normalized):
+            if self._is_noisy_topic_token(normalized) or is_weak_topic_token(normalized):
                 continue
             marker = normalized.lower()
             if marker in seen:
@@ -757,6 +903,43 @@ class BookmarkClassifier:
             review_penalty_applied = rule_confidence != raw_rule_confidence
             quality_signals = sorted(set(quality_signals + ["待审阅"]))
         auto_assign_confidence = float(self.scoring.get("auto_assign_confidence", 0.55))
+        llm_assignment = self._lookup_assignment(bookmark)
+        llm_assignment_applied = False
+        assignment_confidence = 0.0
+        if llm_assignment:
+            assignment_confidence = self._assignment_confidence(llm_assignment.get("confidence"))
+            assignment_category = str(llm_assignment.get("category") or "").strip()
+            if assignment_category and assignment_confidence >= auto_assign_confidence:
+                fallback_category = assignment_category
+                primary_topics = [assignment_category]
+                secondary_topics = []
+                topic_labels = [assignment_category]
+                rule_confidence = max(rule_confidence, assignment_confidence)
+                llm_assignment_applied = True
+                assignment_rule = {
+                    "category": assignment_category,
+                    "root": self._category_root(assignment_category),
+                    "leaf": self._category_leaf(assignment_category),
+                    "total": round(max(float(self.scoring.get("confirm_threshold", 25)), top_score), 2),
+                    "strong_evidence": True,
+                    "evidence": [
+                        {
+                            "signal": "llm_cluster_assignment",
+                            "strength": round(assignment_confidence * 100, 2),
+                            "matched": llm_assignment.get("source_cluster_id"),
+                        }
+                    ],
+                }
+                rule_candidates = [assignment_rule] + [
+                    item for item in rule_candidates if item.get("category") != assignment_category
+                ][:4]
+                rule_roots = [
+                    {
+                        "root": self._category_root(assignment_category),
+                        "total": assignment_rule["total"],
+                        "support": 1.0,
+                    }
+                ]
         if rule_confidence < auto_assign_confidence:
             fallback_category = self.default_category
             primary_topics = []
@@ -765,19 +948,20 @@ class BookmarkClassifier:
         fetch_status = str(signal_sections["health_access"].get("fetch_status") or "")
         needs_confirmation = (
             fallback_category == self.default_category
-            or top_score < self.scoring["min_score"]
+            or (top_score < self.scoring["min_score"] and not llm_assignment_applied)
             or rule_confidence < auto_assign_confidence
+            or review_required
         )
         needs_confirmation_reasons = []
         if review_required and not link_health.get("trusted_override"):
             needs_confirmation_reasons.append("fetch_review_required")
         if fallback_category == self.default_category:
             needs_confirmation_reasons.append("default_category_fallback")
-        if top_score < self.scoring["min_score"]:
+        if top_score < self.scoring["min_score"] and not llm_assignment_applied:
             needs_confirmation_reasons.append("score_below_min")
         if rule_confidence < auto_assign_confidence:
             needs_confirmation_reasons.append("low_rule_confidence")
-        if dynamic_candidates:
+        if dynamic_candidates and not llm_assignment_applied:
             needs_confirmation_reasons.append("open_topic_candidates_present")
         if fetch_status and fetch_status != "success" and fallback_category == self.default_category:
             needs_confirmation_reasons.append("fetch_limited_signal")
@@ -810,6 +994,9 @@ class BookmarkClassifier:
             review_required,
             link_health,
         )
+        if llm_assignment_applied:
+            used_signal_families = sorted(set(used_signal_families + ["identity"]))
+            used_signal_fields = sorted(set(used_signal_fields + ["identity.canonical_identity"]))
         top_decision_drivers = self._build_top_decision_drivers(
             rule_candidates,
             resource_type,
@@ -818,6 +1005,17 @@ class BookmarkClassifier:
             review_required,
             confirmation_bucket,
         )
+        if llm_assignment_applied:
+            top_decision_drivers.insert(
+                0,
+                {
+                    "driver": "llm_cluster_assignment",
+                    "summary": fallback_category,
+                    "signal_fields": ["identity.canonical_identity"],
+                },
+            )
+            top_decision_drivers = top_decision_drivers[:4]
+        reported_score = max(top_score, float(self.scoring.get("confirm_threshold", 25))) if llm_assignment_applied else top_score
         confidence_components = {
             "top_score": round(top_score, 2),
             "runner_up_score": round(runner_up_score, 2),
@@ -828,6 +1026,8 @@ class BookmarkClassifier:
             "final_rule_confidence": rule_confidence,
             "strong_rule_evidence": bool(topic_scores and self._is_strong_rule_evidence(topic_scores[0])),
             "review_penalty_applied": review_penalty_applied,
+            "llm_assignment_confidence": assignment_confidence,
+            "llm_assignment_applied": llm_assignment_applied,
         }
         classification_evidence = {
             "topic_scores": topic_scores[:8],
@@ -870,6 +1070,7 @@ class BookmarkClassifier:
             },
             "top_decision_drivers": top_decision_drivers,
             "confidence_components": confidence_components,
+            "llm_assignment": llm_assignment if llm_assignment else None,
         }
 
         return {
@@ -891,7 +1092,7 @@ class BookmarkClassifier:
             "top_decision_drivers": top_decision_drivers,
             "confidence_components": confidence_components,
             "classification_evidence": classification_evidence,
-            "score": round(top_score, 2),
+            "score": round(reported_score, 2),
             "needs_confirmation": needs_confirmation,
             "needs_confirmation_reasons": needs_confirmation_reasons,
             "confirmation_bucket": confirmation_bucket,
@@ -1017,8 +1218,8 @@ def export_confirmation_report(confirm_needed: list, report_file: Path) -> None:
 def main() -> int:
     parser = build_parser("分类书签")
     parser.add_argument("--input", type=Path, default=None)
-    parser.add_argument("--rules", type=Path, default=None)
-    parser.add_argument("--rules-override", type=Path, default=None)
+    parser.add_argument("--taxonomy", type=Path, default=None, help="LLM 生成的用户 taxonomy 文件")
+    parser.add_argument("--assignments", type=Path, default=None, help="LLM 生成的书签赋类约束文件")
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--report", type=Path, default=None, help="待确认报告输出路径")
     args = parser.parse_args()
@@ -1026,17 +1227,21 @@ def main() -> int:
     config = load_config_from_args(args)
     logger = configure_logging(config, args.log_level)
     input_file = args.input or config.paths.enriched_file
-    rules_file = args.rules or config.paths.rules_file
-    rules_override_file = args.rules_override or config.paths.rules_override_file
+    user_taxonomy_file = args.taxonomy or config.paths.user_taxonomy_file
+    assignment_file = args.assignments or config.paths.bookmark_assignment_file
     output_file = args.output or config.paths.classified_file
     report_file = args.report or config.paths.confirmation_report_file
 
     if not input_file.exists():
         print(f"错误: 输入文件不存在: {input_file}")
         return 1
-    if not rules_file.exists():
-        print(f"错误: 分类规则文件不存在: {rules_file}")
-        return 1
+    for explicit_path, label in (
+        (args.taxonomy, "用户 taxonomy 文件"),
+        (args.assignments, "书签赋类约束文件"),
+    ):
+        if explicit_path and not explicit_path.exists():
+            print(f"错误: {label}不存在: {explicit_path}")
+            return 1
 
     try:
         input_payload = require_payload_schema(
@@ -1050,7 +1255,11 @@ def main() -> int:
         return 1
 
     bookmarks = input_payload["bookmarks"]
-    classifier = BookmarkClassifier(rules_file, config.classification_options, rules_override_file)
+    classifier = BookmarkClassifier(
+        classification_options=config.classification_options,
+        user_taxonomy_file=user_taxonomy_file if user_taxonomy_file and user_taxonomy_file.exists() else None,
+        assignment_file=assignment_file if assignment_file and assignment_file.exists() else None,
+    )
     classified_bookmarks, stats, confirm_needed = classifier.classify_all(bookmarks)
 
     output = {

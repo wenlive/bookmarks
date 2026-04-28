@@ -54,7 +54,7 @@ python3 scripts/3_fetch_webpage_info.py --config skill_config.json --use-proxy -
 ## Partial Reruns
 
 ```bash
-# Rules or classification logic changed.
+# Generated taxonomy or classification logic changed.
 python3 scripts/4_classify_bookmarks.py --config skill_config.json
 python3 scripts/5_cluster_bookmarks.py --config skill_config.json
 python3 scripts/6_generate_html.py --config skill_config.json
@@ -67,13 +67,23 @@ python3 scripts/6_generate_html.py --config skill_config.json
 python3 scripts/6_generate_html.py --config skill_config.json
 ```
 
+## Taxonomy Bootstrap
+
+```bash
+# Generate the prompt and supporting cluster evidence for an external LLM.
+./organize.sh data/bookmarks.html skill_config.json --bootstrap-taxonomy
+
+# Apply the strict JSON response from the external LLM.
+python3 scripts/apply_taxonomy_response.py --config skill_config.json --response data/generated/taxonomy_response.json
+```
+
 ## Key Files
 
 | Path | Meaning |
 | --- | --- |
 | `skill_config.json` | Operational config |
-| `data/category_rules.json` | Shared default rules |
-| `data/category_rules_overrides.json` | Local rule extensions |
+| `data/generated/user_taxonomy.json` | Generated user taxonomy, ignored by git |
+| `data/generated/bookmark_taxonomy_assignments.json` | Generated bookmark assignment constraints, ignored by git |
 | `data/bookmarks.html` | Copied Chrome export |
 | `data/bookmarks_with_info.json` | Fetch cache and enriched metadata |
 | `data/classified_bookmarks.json` | Classification result |
@@ -90,6 +100,8 @@ output/reports/review_queue.json
 output/reports/rule_suggestions.json
 output/reports/quality_report.json
 output/reports/signal_audit.json
+output/reports/taxonomy_bootstrap_prompt.md
+output/reports/taxonomy_bootstrap_clusters.json
 ```
 
 ## Report Meanings
@@ -104,8 +116,8 @@ output/reports/signal_audit.json
 ## Quality Check
 
 ```bash
-python3 -m py_compile scripts/common.py scripts/1_copy_bookmark.py scripts/2_parse_bookmarks.py scripts/3_fetch_webpage_info.py scripts/4_classify_bookmarks.py scripts/5_cluster_bookmarks.py scripts/6_generate_html.py scripts/reset_pipeline_state.py
-python3 -c "import json; [json.load(open(path)) for path in ['data/category_rules.json','data/category_rules_overrides.json','skill_config.json']]"
+python3 -m py_compile scripts/common.py scripts/1_copy_bookmark.py scripts/2_parse_bookmarks.py scripts/3_fetch_webpage_info.py scripts/4_classify_bookmarks.py scripts/5_cluster_bookmarks.py scripts/6_generate_html.py scripts/generate_taxonomy_bootstrap.py scripts/apply_taxonomy_response.py scripts/reset_pipeline_state.py
+python3 -c "import json; json.load(open('skill_config.json'))"
 pytest -q
 git diff --check
 ```
@@ -132,17 +144,14 @@ normal_root_direct_bookmark_share does not grow unexpectedly
 - Do not trust old Chrome folders as topic evidence.
 - Do not classify by broad platform domain.
 - Preserve broken links; mirror them to `待审阅`.
-- Prefer precise overrides over broad default-rule edits.
+- Prefer generated user taxonomy constraints over broad built-in defaults.
 - Rerun only the downstream steps required by the change.
 
 ## Default Output Shape
 
 ```text
 书签栏
-├── 技术主题
-├── 工具与平台
-├── 学习与资料
-├── 个人与生活
+├── 主要主题
 ├── 待整理
 ├── 发现主题
 └── 待审阅  # only when review items exist

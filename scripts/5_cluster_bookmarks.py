@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import re
 from collections import Counter, defaultdict
@@ -23,6 +24,8 @@ from common import (
     configure_logging,
     ensure_parent,
     flatten_signal_pack,
+    is_noisy_topic_token,
+    is_weak_topic_token,
     is_source_like_topic_token,
     is_generic_platform_domain,
     load_config_from_args,
@@ -115,13 +118,6 @@ DISPLAY_TOKEN_OVERRIDES = {
     "html": "HTML",
     "json": "JSON",
     "llm": "LLM",
-    "openai": "OpenAI",
-    "fastapi": "FastAPI",
-    "tidb": "TiDB",
-    "tikv": "TiKV",
-    "postgresql": "PostgreSQL",
-    "mysql": "MySQL",
-    "redis": "Redis",
     "github": "GitHub",
 }
 
@@ -270,16 +266,17 @@ class BookmarkClusterer:
     @staticmethod
     def _is_source_like_topic(value: str) -> bool:
         normalized = (value or "").lower()
-        return any(token in normalized for token in ("github", "gitlab", "gitee", "git/", "/git")) or any(
-            token in value
-            for token in ("开发工具/Git", "开源项目", "技术博客", "文档与教程")
-        )
+        return any(token in normalized for token in ("github", "gitlab", "gitee", "git/", "/git"))
 
     def _is_noisy_topic_label(self, value: str) -> bool:
         label = self._human_label(value)
         if not label:
             return False
-        return is_source_like_topic_token(label, self.source_like_topic_tokens)
+        return is_noisy_topic_token(label, self.source_like_topic_tokens)
+
+    @staticmethod
+    def _is_weak_topic_label(value: str) -> bool:
+        return is_weak_topic_token(value)
 
     def _category_leaf_label(self, category: str, root_category: str | None = None) -> str:
         parts = [part for part in category.split("/") if part]
@@ -305,11 +302,57 @@ class BookmarkClusterer:
         counter: Counter[str] = Counter()
         root_category = category.split("/")[0] if category else ""
         for bookmark in bookmarks:
+            confidence = float(bookmark.get("classification", {}).get("rule_confidence", 0.0) or 0.0)
+            if confidence < 0.72:
+                continue
             bookmark_category = bookmark.get("classification", {}).get("category", "")
             leaf = self._category_leaf_label(bookmark_category, root_category)
-            if leaf and not self._is_generic_label(leaf, category):
+            label_context = root_category or category
+            if leaf and not self._is_generic_label(leaf, label_context) and not self._is_weak_topic_label(leaf):
                 counter[leaf] += 1
-        return counter.most_common(1)[0][0] if counter else ""
+        return sorted(counter.items(), key=lambda item: (-item[1], item[0]))[0][0] if counter else ""
+
+    def _generic_platform_share(self, bookmarks: List[dict]) -> float:
+        if not bookmarks:
+            return 0.0
+        generic_count = 0
+        for bookmark in bookmarks:
+            feature = self.build_feature_set(bookmark)
+            if self._is_generic_platform(feature.registered_domain or feature.domain):
+                generic_count += 1
+        return generic_count / len(bookmarks)
+
+    def _generic_repo_label(self, bookmark: dict) -> str:
+        feature = self.build_feature_set(bookmark)
+        domain = feature.registered_domain or feature.domain
+        if not self._is_generic_platform(domain) or not any(
+            domain_matches in domain
+            for domain_matches in ("github.com", "gitlab.com", "gitee.com", "bitbucket.org")
+        ):
+            return ""
+        parsed = urlparse(bookmark.get("url", ""))
+        segments = [segment for segment in parsed.path.split("/") if segment]
+        if len(segments) < 2:
+            return ""
+        repo = re.sub(r"\.git$", "", segments[1], flags=re.IGNORECASE).strip()
+        label = self.clean_topic_token(repo)
+        if not label or self._is_generic_label(label) or self._is_weak_topic_label(label):
+            return ""
+        return label
+
+    def _dominant_project_label(self, bookmarks: List[dict], category: str = "") -> str:
+        counter: Counter[str] = Counter()
+        for bookmark in bookmarks:
+            label = self._generic_repo_label(bookmark)
+            if label and not self._is_generic_label(label, category):
+                counter[label] += 1
+        if not counter:
+            return ""
+        min_support = 1 if len(bookmarks) == 1 else 2
+        for label, count in sorted(counter.items(), key=lambda item: (-item[1], item[0])):
+            if count >= min_support:
+                return label
+        return ""
 
     def _dominant_site_label(self, bookmarks: List[dict], category: str) -> str:
         counter: Counter[str] = Counter()
@@ -328,7 +371,7 @@ class BookmarkClusterer:
                 if label and not self._is_generic_label(label, category):
                     counter[label] += 1
                     break
-        return counter.most_common(1)[0][0] if counter else ""
+        return sorted(counter.items(), key=lambda item: (-item[1], item[0]))[0][0] if counter else ""
 
     def _dominant_domain_label(self, bookmarks: List[dict]) -> str:
         counter: Counter[str] = Counter()
@@ -339,7 +382,7 @@ class BookmarkClusterer:
             label = self._domain_display_name(domain)
             if label:
                 counter[label] += 1
-        return counter.most_common(1)[0][0] if counter else ""
+        return sorted(counter.items(), key=lambda item: (-item[1], item[0]))[0][0] if counter else ""
 
     def _dominant_hint_label(self, bookmarks: List[dict], category: str = "") -> str:
         counter: Counter[str] = Counter()
@@ -358,7 +401,19 @@ class BookmarkClusterer:
                     continue
                 if label and not self._is_generic_label(label, category):
                     counter[label] += 1
-        return counter.most_common(1)[0][0] if counter else ""
+        for label, count in sorted(
+            counter.items(),
+            key=lambda item: (
+                -item[1],
+                self._is_weak_topic_label(item[0]),
+                -len(normalize_topic_token(item[0])),
+                item[0],
+            ),
+        ):
+            if self._is_weak_topic_label(label) and count < 2:
+                continue
+            return label
+        return ""
 
     def _cluster_display_name(
         self,
@@ -367,15 +422,29 @@ class BookmarkClusterer:
         best_folder: Sequence[str] | None = None,
         folder_quality: float = 0.0,
     ) -> str:
-        for candidate in (
-            self._dominant_hint_label(bookmarks, category),
-        ):
-            if candidate and not self._is_generic_label(candidate, category):
-                return candidate
+        generic_platform_share = self._generic_platform_share(bookmarks)
+        leaf_label_context = category.split("/")[0] if category else category
+        if generic_platform_share >= 0.45:
+            for candidate in (
+                self._dominant_project_label(bookmarks, leaf_label_context),
+                self._dominant_hint_label(bookmarks, leaf_label_context),
+                self._dominant_category_leaf(bookmarks, category),
+                self._dominant_domain_label(bookmarks),
+            ):
+                if candidate and not self._is_generic_label(candidate, leaf_label_context):
+                    return candidate
+        else:
+            for candidate in (
+                self._dominant_hint_label(bookmarks, category),
+            ):
+                if candidate and not self._is_generic_label(candidate, category):
+                    return candidate
 
         for token in self._representative_tokens(bookmarks, limit=4):
             candidate = self.clean_topic_token(token)
-            if candidate and not self._is_generic_label(candidate, category):
+            if candidate and not self._is_generic_label(candidate, category) and not (
+                generic_platform_share >= 0.45 and self._is_weak_topic_label(candidate)
+            ):
                 return candidate
 
         for candidate in (
@@ -383,7 +452,7 @@ class BookmarkClusterer:
             self._dominant_site_label(bookmarks, category),
             self._dominant_domain_label(bookmarks),
         ):
-            if candidate and not self._is_generic_label(candidate, category):
+            if candidate and not self._is_generic_label(candidate, leaf_label_context):
                 return candidate
 
         return "其他"
@@ -391,7 +460,13 @@ class BookmarkClusterer:
     def extract_keywords(self, text: str) -> List[str]:
         normalized = text.lower().replace("-", " ").replace("_", " ")
         normalized = re.sub(r"[^\w\s\u4e00-\u9fff]", " ", normalized)
-        return [word for word in normalized.split() if word not in STOPWORDS and len(word) > 1]
+        return [
+            word
+            for word in normalized.split()
+            if word not in STOPWORDS
+            and len(word) > 1
+            and not is_noisy_topic_token(word, self.source_like_topic_tokens)
+        ]
 
     def _tokenize_path(self, url: str) -> tuple[set[str], set[str]]:
         parsed = urlparse(url)
@@ -670,7 +745,18 @@ class BookmarkClusterer:
             and not (left.rule_roots & right.rule_roots)
             and hint_similarity < 0.15
         ):
-            conflict_penalty = 0.15
+            conflict_penalty = 0.28
+        strong_topic_conflict = (
+            left.rule_confidence >= 0.72
+            and right.rule_confidence >= 0.72
+            and left.primary_topic
+            and right.primary_topic
+            and left.primary_topic != right.primary_topic
+            and not _is_default_or_generic_category(left.primary_topic)
+            and not _is_default_or_generic_category(right.primary_topic)
+        )
+        if generic_platform_match and strong_topic_conflict and topic_overlap < 0.35 and hint_similarity < 0.35:
+            conflict_penalty = max(conflict_penalty, 0.34)
         if (
             same_registered_domain
             and not resource_type_match
@@ -685,7 +771,7 @@ class BookmarkClusterer:
             and text_similarity < 0.28
             and hint_similarity < 0.25
         ):
-            conflict_penalty = max(conflict_penalty, 0.24)
+            conflict_penalty = max(conflict_penalty, 0.3)
         time_similarity = self._jaccard(left.time_buckets, right.time_buckets)
         return {
             "topic_overlap": topic_overlap,
@@ -785,7 +871,7 @@ class BookmarkClusterer:
         seen = set()
         for part in cleaned.split():
             key = part.lower()
-            if key in STOPWORDS or key in seen:
+            if key in STOPWORDS or key in seen or is_noisy_topic_token(part, self.source_like_topic_tokens):
                 continue
             seen.add(key)
             parts.append(DISPLAY_TOKEN_OVERRIDES.get(key, part))
@@ -1058,9 +1144,16 @@ class BookmarkClusterer:
             counter.update(features.path_tokens)
         filtered: list[str] = []
         seen = set()
-        for token, _ in counter.most_common(limit * 4):
+        min_weak_support = 1 if len(bookmarks) <= 2 else 2
+        ranked_tokens = sorted(
+            counter.items(),
+            key=lambda item: (-item[1], normalize_topic_token(self.clean_topic_token(item[0])), str(item[0]).lower()),
+        )
+        for token, count in ranked_tokens[: limit * 6]:
             cleaned = self.clean_topic_token(token)
             if not cleaned or self._is_generic_label(cleaned):
+                continue
+            if self._is_weak_topic_label(cleaned) and count < min_weak_support:
                 continue
             marker = normalize_topic_token(cleaned)
             if marker in seen:
@@ -1071,12 +1164,26 @@ class BookmarkClusterer:
                 break
         if filtered:
             return filtered
-        return [token for token, _ in counter.most_common(limit)]
+        return [token for token, _ in ranked_tokens[:limit]]
+
+    @staticmethod
+    def _clone_hierarchy_payload(payload: Dict) -> Dict:
+        cloned: Dict[str, Any] = {}
+        for key, value in payload.items():
+            if key == "bookmarks":
+                cloned[key] = list(value or [])
+            elif isinstance(value, (list, dict, set)):
+                cloned[key] = copy.deepcopy(value)
+            else:
+                cloned[key] = value
+        return cloned
 
     def _split_strong_category_groups(self, cluster: List[dict]) -> List[List[dict]]:
-        if len(cluster) < max(6, self.min_cluster_size):
+        if len(cluster) < 3:
             return [cluster]
 
+        generic_platform_share = self._generic_platform_share(cluster)
+        min_group_size = 1 if generic_platform_share >= 0.45 and len(cluster) <= 5 else 2
         category_groups: dict[str, list[dict]] = defaultdict(list)
         for bookmark in cluster:
             classification = bookmark.get("classification", {})
@@ -1089,27 +1196,30 @@ class BookmarkClusterer:
         eligible_groups = [
             group
             for _, group in sorted(category_groups.items())
-            if len(group) >= 2
+            if len(group) >= min_group_size
         ]
         if len(eligible_groups) < 2:
             return [cluster]
 
         coverage = sum(len(group) for group in eligible_groups) / len(cluster)
         group_shares = sorted((len(group) / len(cluster) for group in eligible_groups), reverse=True)
-        if coverage < 0.7 or (len(group_shares) > 1 and group_shares[1] < 0.2):
+        if generic_platform_share >= 0.45:
+            if coverage < 0.66:
+                return [cluster]
+        elif coverage < 0.7 or (len(group_shares) > 1 and group_shares[1] < 0.2):
             return [cluster]
 
         covered_ids = {bookmark.get("id") for group in eligible_groups for bookmark in group}
         remainder = [bookmark for bookmark in cluster if bookmark.get("id") not in covered_ids]
         split_groups = eligible_groups + ([remainder] if remainder else [])
-        if 1 < len(split_groups) < len(cluster):
+        if 1 < len(split_groups):
             return split_groups
         return [cluster]
 
     def _merge_named_subcategory(self, subcategories: Dict[str, Dict], name: str, payload: Dict) -> None:
         existing = subcategories.get(name)
         if existing is None:
-            subcategories[name] = payload
+            subcategories[name] = self._clone_hierarchy_payload(payload)
             return
         existing["name"] = existing.get("name", payload.get("name", name))
         existing["display_order"] = min(
@@ -1457,6 +1567,16 @@ def _is_default_or_generic_category(category: str, tidy_root_name: str = "待整
     )
 
 
+def stable_cluster_id(bookmarks: List[dict]) -> str:
+    identities = []
+    for bookmark in bookmarks:
+        signal_pack = bookmark.get("signal_pack") or build_signal_pack(bookmark)
+        sections = signal_pack_sections(signal_pack)
+        identities.append(str(sections["identity"].get("canonical_identity") or bookmark.get("url") or bookmark.get("id") or ""))
+    digest = hashlib.sha1("\n".join(sorted(identities)).encode("utf-8")).hexdigest()[:12]
+    return f"bc_{digest}"
+
+
 def build_cluster_payloads(
     clusterer: BookmarkClusterer,
     bookmarks: List[dict],
@@ -1484,6 +1604,7 @@ def build_cluster_payloads(
             clusterer._category_leaf_label(dominant_categories[0]["category"], dominant_categories[0]["root"])
             if dominant_categories else ""
         )
+        label_context = dominant_categories[0]["root"] if dominant_categories else category_hint.split("/")[0]
         if dominant_leaf and dominant_categories and dominant_categories[0]["share"] >= 0.6:
             cluster_label = dominant_leaf
             cluster_label_basis = "dominant_leaf"
@@ -1491,13 +1612,13 @@ def build_cluster_payloads(
             if dominant_leaf:
                 cluster_label = dominant_leaf
                 cluster_label_basis = "single_leaf"
-        if clusterer._is_generic_label(cluster_label, category_hint) and dominant_leaf:
+        if clusterer._is_generic_label(cluster_label, label_context) and dominant_leaf:
             cluster_label = dominant_leaf
             cluster_label_basis = "dominant_leaf_fallback"
-        if clusterer._is_generic_label(cluster_label, category_hint):
+        if clusterer._is_generic_label(cluster_label, label_context):
             for topic in discovered_topics:
                 candidate = clusterer._human_label(topic)
-                if candidate and not clusterer._is_generic_label(candidate, category_hint):
+                if candidate and not clusterer._is_generic_label(candidate, label_context):
                     cluster_label = candidate
                     cluster_label_basis = "discovered_topic_fallback"
                     break
@@ -1618,7 +1739,8 @@ def build_cluster_payloads(
         ),
     )
     for index, item in enumerate(ordered_payloads, start=1):
-        item["cluster_id"] = f"cluster_{index:04d}"
+        item["cluster_id"] = stable_cluster_id(item.get("bookmarks", []))
+        item["cluster_order"] = index
     return ordered_payloads
 
 
@@ -1674,10 +1796,10 @@ def build_clustered_root_hierarchy(
             subcategory_name = leaf_name if len(profile["bookmarks"]) == 1 and leaf_name else display_name
             payload = {
                 "name": subcategory_name,
-                "bookmarks": profile["bookmarks"],
+                "bookmarks": list(profile.get("bookmarks") or []),
                 "count": len(profile["bookmarks"]),
                 "cluster_reason": profile["cluster_reason"],
-                "representative_tokens": profile["representative_tokens"],
+                "representative_tokens": list(profile.get("representative_tokens") or []),
                 "source_folder_reused": profile["source_folder_reused"],
                 "source_folder_quality_score": profile["source_folder_quality_score"],
                 "merge_from_categories": sorted(
@@ -1687,8 +1809,8 @@ def build_clustered_root_hierarchy(
                         if item.get("category")
                     }
                 ),
-                "dominant_rule_roots": profile.get("dominant_rule_roots", []),
-                "discovered_topics": profile.get("discovered_topics", []),
+                "dominant_rule_roots": copy.deepcopy(profile.get("dominant_rule_roots", [])),
+                "discovered_topics": list(profile.get("discovered_topics", [])),
             }
             clusterer._merge_named_subcategory(root_payload["subcategories"], subcategory_name, payload)
         else:
@@ -1810,6 +1932,34 @@ def compact_hierarchy_map(hierarchy: dict[str, dict]) -> dict[str, dict]:
     }
 
 
+def build_auto_root_groups(root_hierarchy: dict[str, dict], display_options: dict) -> list[dict[str, list[str] | str]]:
+    discovery_root_name = display_options.get("discovery_root_name", "发现主题")
+    tidy_root_name = display_options.get("tidy_root_name", "待整理")
+    main_group_name = display_options.get("main_group_name", "主要主题")
+
+    normal_roots = [
+        root
+        for root in root_hierarchy
+        if root not in {discovery_root_name, tidy_root_name, "其他/未分类"}
+    ]
+    specs: list[dict[str, list[str] | str]] = []
+    if normal_roots:
+        specs.append({"name": main_group_name, "roots": normal_roots})
+
+    tidy_roots = [
+        root
+        for root in (tidy_root_name, "其他/未分类")
+        if root in root_hierarchy
+    ]
+    if tidy_roots:
+        specs.append({"name": tidy_root_name, "roots": tidy_roots})
+
+    if discovery_root_name in root_hierarchy:
+        specs.append({"name": discovery_root_name, "roots": [discovery_root_name]})
+
+    return specs
+
+
 def build_display_hierarchy(
     clusterer: BookmarkClusterer,
     root_hierarchy: dict[str, dict],
@@ -1820,6 +1970,8 @@ def build_display_hierarchy(
     discovery_root_name = display_options.get("discovery_root_name", "发现主题")
     collapse_single_child = bool(display_options.get("collapse_single_child", True))
     max_depth = int(display_options.get("max_depth", 3))
+    if not root_groups or display_options.get("grouping_mode") == "auto":
+        root_groups = build_auto_root_groups(root_hierarchy, display_options)
 
     specs = [
         {
@@ -1893,6 +2045,16 @@ def generate_rule_suggestions(
 ) -> dict[str, Any]:
     generic_platform_domains = generic_platform_domains or set(DEFAULT_GENERIC_PLATFORM_DOMAINS)
     suggestions: list[dict[str, Any]] = []
+
+    def is_specific_domain_candidate(domain: str) -> bool:
+        normalized = (domain or "").strip().strip(".").lower()
+        if not re.fullmatch(r"[a-z0-9-]+(?:\.[a-z0-9-]+)+", normalized):
+            return False
+        labels = normalized.split(".")
+        if len(labels) == 2 and labels[1] in {"cn", "uk", "jp", "au"} and labels[0] in {"ac", "co", "com", "edu", "gov", "net", "org"}:
+            return False
+        return True
+
     for profile in cluster_profiles:
         size = len(profile.get("bookmarks", []))
         if size < 4:
@@ -1907,6 +2069,7 @@ def generate_rule_suggestions(
             item["domain"]
             for item in profile.get("top_domains", [])[:3]
             if item.get("domain") and not is_generic_platform_domain(item["domain"], generic_platform_domains)
+            and is_specific_domain_candidate(item["domain"])
         ]
         generic_platform_share = max(
             (

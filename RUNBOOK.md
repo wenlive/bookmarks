@@ -66,7 +66,9 @@ conda run -n base ./organize.sh data/bookmarks.html skill_config.json
 | Want to refresh all pages | `./organize.sh data/bookmarks.html skill_config.json --force-refetch` |
 | Want to discard only fetch cache | `./organize.sh data/bookmarks.html skill_config.json --clear-fetch-cache` |
 | Want to discard all generated state | `./organize.sh data/bookmarks.html skill_config.json --reset-all` |
-| Changed only classification rules | rerun steps 4, 5, 6 |
+| Need a first-pass taxonomy prompt | `./organize.sh data/bookmarks.html skill_config.json --bootstrap-taxonomy` |
+| Applied external taxonomy response | `python3 scripts/apply_taxonomy_response.py --config skill_config.json --response data/generated/taxonomy_response.json`, then rerun steps 4, 5, 6 |
+| Changed generated taxonomy or classification logic | rerun steps 4, 5, 6 |
 | Changed only clustering/display logic | rerun steps 5, 6 |
 | Changed only HTML generation | rerun step 6 |
 
@@ -163,6 +165,39 @@ python3 scripts/5_cluster_bookmarks.py --config skill_config.json
 python3 scripts/6_generate_html.py --config skill_config.json
 ```
 
+## Taxonomy Bootstrap
+
+The default repository has no checked-in category rule files. A first run can
+cluster with open-topic evidence, then produce an external-LLM prompt:
+
+```bash
+./organize.sh data/bookmarks.html skill_config.json --bootstrap-taxonomy
+```
+
+Give `output/reports/taxonomy_bootstrap_prompt.md` to the external model. Keep
+`output/reports/taxonomy_bootstrap_clusters.json` locally as the structured
+evidence backing that prompt.
+
+After receiving strict JSON, save it as `data/generated/taxonomy_response.json`
+and apply it:
+
+```bash
+python3 scripts/apply_taxonomy_response.py --config skill_config.json --response data/generated/taxonomy_response.json
+python3 scripts/4_classify_bookmarks.py --config skill_config.json
+python3 scripts/5_cluster_bookmarks.py --config skill_config.json
+python3 scripts/6_generate_html.py --config skill_config.json
+```
+
+This writes ignored generated state:
+
+```text
+data/generated/user_taxonomy.json
+data/generated/bookmark_taxonomy_assignments.json
+```
+
+External `title_patterns` are treated as literal phrases by default. Use object
+form such as `{"regex": "..."}` only when a real regular expression is intended.
+
 Proxy-first fetch with built-in direct retry:
 
 ```bash
@@ -191,16 +226,27 @@ Real-input validation on `2026-04-28` is recorded in `TODO_RUNTIME_FOLLOWUP.md`.
 
 Headline metrics from that run:
 
-- input bookmarks: `1012`
-- duplicates: `199`
-- unique domains: `437`
+- input bookmarks: `1014`
+- duplicate URL groups: `92`
+- unique domains: `439`
 - fetch success: `745`
-- fetch review queue: `92`
-- classify `待确认`: `276`
-- classify `待整理`: `279`
-- cluster count: `716`
-- discovery clusters: `28`
-- mixed clusters: `30`
+- fetch review queue: `269`
+- generated taxonomy categories: `41`
+- generated cluster assignments: `371`
+- classify `待确认`: `470`
+- classify `待整理`: `407`
+- cluster count: `623`
+- discovery clusters: `1`
+- mixed clusters: `5`
+- generic-platform clusters: `235`
+- largest generic-platform cluster size: `11`
+
+Guardrail metrics from that run:
+
+- `folder_only_classification_count = 0`
+- `low_confidence_normal_category_count = 0`
+- `generic_platform_domain_suggestion_count = 0`
+- `fetch_blocked_discovery_cluster_count = 0`
 
 Use that file as the continuation baseline when doing behavior-sensitive work.
 
@@ -237,7 +283,8 @@ This includes:
 - certificate failures
 - invalid URLs
 
-Trusted-access policy may suppress some noisy sites such as `zhihu.com`, `csdn.net`, `github.com`, `gitbook.com`, and `gitbook.io`.
+Trusted-access policy is disabled by default. If a local config enables it, keep
+site rules narrow and document why review suppression is acceptable.
 
 ### `needs_confirmation.json`
 
@@ -253,12 +300,12 @@ Important fields to inspect:
 This is the main report for deciding whether uncertainty came from:
 
 - fetch blockage
-- rule coverage gaps
+- generated taxonomy coverage gaps
 - low-confidence matches
 
 ### `rule_suggestions.json`
 
-Structured rule-improvement suggestions.
+Structured taxonomy and clustering improvement suggestions.
 
 Current suggestion types include:
 
@@ -382,7 +429,7 @@ output/reports/signal_audit.json
 Then decide whether the main issue is:
 
 - fetch blockage
-- rule gaps
+- generated taxonomy gaps
 - generic-platform naming noise
 - mixed clusters
 
@@ -393,8 +440,8 @@ Inspect `largest_generic_platform_clusters` in `quality_report.json`.
 Prefer these fixes:
 
 - remove source/platform tokens from cluster labels and hints
-- add precise non-platform topic aliases
-- add topic-specific project/product domains
+- add precise non-platform topic aliases through generated taxonomy
+- add topic-specific project/product domains through generated taxonomy
 - split mixed clusters earlier
 
 Avoid adding `github.com`, `csdn.net`, `zhihu.com`, `docs.qq.com`, or similar broad domains to topic categories.
@@ -402,8 +449,8 @@ Avoid adding `github.com`, `csdn.net`, `zhihu.com`, `docs.qq.com`, or similar br
 ## Validation Before Commit
 
 ```bash
-python3 -m py_compile scripts/common.py scripts/1_copy_bookmark.py scripts/2_parse_bookmarks.py scripts/3_fetch_webpage_info.py scripts/4_classify_bookmarks.py scripts/5_cluster_bookmarks.py scripts/6_generate_html.py scripts/reset_pipeline_state.py
-python3 -c "import json; [json.load(open(path)) for path in ['data/category_rules.json','data/category_rules_overrides.json','skill_config.json']]"
+python3 -m py_compile scripts/common.py scripts/1_copy_bookmark.py scripts/2_parse_bookmarks.py scripts/3_fetch_webpage_info.py scripts/4_classify_bookmarks.py scripts/5_cluster_bookmarks.py scripts/6_generate_html.py scripts/generate_taxonomy_bootstrap.py scripts/apply_taxonomy_response.py scripts/reset_pipeline_state.py
+python3 -c "import json; json.load(open('skill_config.json'))"
 pytest -q
 git diff --check
 ```

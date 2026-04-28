@@ -1,5 +1,6 @@
 import json
 import asyncio
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -9,7 +10,7 @@ SCRIPTS = ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from test_pipeline_support import build_metadata, write_enriched_fixture  # noqa: E402
-from scripts_compat import common_module, parse_bookmarks_module, classify_module, cluster_module, html_module, copy_module, fetch_module, reset_module  # noqa: E402
+from scripts_compat import common_module, parse_bookmarks_module, classify_module, cluster_module, html_module, copy_module, fetch_module, reset_module, bootstrap_module, apply_taxonomy_module  # noqa: E402
 
 
 def _bookmark(index, *, name, url, domain, category, folder, resource_type="文档", title="", description="", keywords="", content_preview=""):
@@ -139,8 +140,7 @@ def test_copy_step_is_noop_for_same_file(tmp_path):
 
 
 def test_classifier_outputs_multidimensional_labels_and_confirmation_report(tmp_path):
-    rules_file = ROOT / "data" / "category_rules.json"
-    classifier = classify_module.BookmarkClassifier(rules_file, {"confirm_threshold": 90, "title_weight": 50})
+    classifier = classify_module.BookmarkClassifier(classification_options={"confirm_threshold": 90, "title_weight": 50})
     bookmark = {
         "id": "bookmark_1",
         "name": "收藏",
@@ -153,16 +153,16 @@ def test_classifier_outputs_multidimensional_labels_and_confirmation_report(tmp_
         ),
     }
     classification = classifier.classify_bookmark(bookmark)
-    assert classification["category"] == "编程语言/Python"
-    assert "编程语言/Python" in classification["primary_topics"]
+    assert classification["category"] == "待整理"
+    assert classification["primary_topics"] == []
     assert classification["resource_type"] in {"文档", "教程"}
     assert "学习" in classification["intent_labels"]
-    assert classification["score"] > 0
+    assert classification["score"] == 0
     assert "classification_evidence" in classification
     assert classification["display_category"] == classification["category"]
-    assert classification["rule_candidates"][0]["category"] == "编程语言/Python"
-    assert classification["rule_roots"][0]["root"] == "编程语言"
-    assert classification["rule_confidence"] > 0
+    assert classification["rule_candidates"] == []
+    assert classification["rule_roots"] == []
+    assert classification["rule_confidence"] == 0
     assert classification["cluster_hints"]
 
     bookmark["classification"] = classification
@@ -170,12 +170,11 @@ def test_classifier_outputs_multidimensional_labels_and_confirmation_report(tmp_
     classify_module.export_confirmation_report([bookmark], report)
     exported = json.loads(report.read_text(encoding="utf-8"))
     assert exported["count"] == 1
-    assert exported["bookmarks"][0]["primary_topics"][0] == "编程语言/Python"
+    assert exported["bookmarks"][0]["primary_topics"] == []
 
 
 def test_classifier_ignores_fetch_operational_terms_in_cluster_hints():
-    rules_file = ROOT / "data" / "category_rules.json"
-    classifier = classify_module.BookmarkClassifier(rules_file, {"confirm_threshold": 90, "title_weight": 50})
+    classifier = classify_module.BookmarkClassifier(classification_options={"confirm_threshold": 90, "title_weight": 50})
     metadata = build_metadata(
         "Mini-LSM Overview",
         "LSM-tree implementation notes",
@@ -1022,7 +1021,7 @@ def test_config_paths_are_resolved_relative_to_config_file(tmp_path):
     config_file.write_text(
         json.dumps(
             {
-                "input": {"bookmark_file": "inputs/bookmarks.html", "rules_file": str(ROOT / "data" / "category_rules.json")},
+                "input": {"bookmark_file": "inputs/bookmarks.html"},
                 "output": {"reports_directory": "reports"},
                 "logging": {"file": "logs/app.log", "console": False},
             },
@@ -1034,6 +1033,219 @@ def test_config_paths_are_resolved_relative_to_config_file(tmp_path):
     assert config.paths.bookmark_file == (config_dir / "inputs" / "bookmarks.html").resolve()
     assert config.paths.log_file == (config_dir / "logs" / "app.log").resolve()
     assert config.paths.confirmation_report_file == (config_dir / "reports" / "needs_confirmation.json").resolve()
+
+
+def test_default_config_has_no_rule_file_dependency_or_root_groups(tmp_path):
+    raw = json.loads((ROOT / "skill_config.json").read_text(encoding="utf-8"))
+    raw.setdefault("input", {})["user_taxonomy_file"] = str(tmp_path / "missing_user_taxonomy.json")
+    raw["input"]["bookmark_assignment_file"] = str(tmp_path / "missing_assignments.json")
+    config_file = tmp_path / "skill_config.json"
+    config_file.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+    config = common_module.PipelineConfig.load(config_file)
+
+    assert config.clustering_options["root_groups"] == []
+    assert config.clustering_options["display"]["grouping_mode"] == "auto"
+    assert config.fetch_options["review_policy"]["trusted_access"]["domain_suffixes"] == []
+    assert classify_module.DEFAULT_RULE_BUNDLE["categories"] == {}
+
+
+def test_taxonomy_bootstrap_generates_prompt_and_cluster_payload(tmp_path):
+    classified_file = tmp_path / "classified.json"
+    reports_dir = tmp_path / "reports"
+    config_file = tmp_path / "skill_config.json"
+    bookmarks = [
+        _bookmark(1, name="Python Packaging Guide", url="https://example.com/python-packaging", domain="example.com", category="待整理", folder=["Inbox"], description="python packaging docs", keywords="python,packaging"),
+        _bookmark(2, name="Python Wheels", url="https://example.com/python-wheels", domain="example.com", category="待整理", folder=["Inbox"], description="python wheel format", keywords="python,wheel"),
+        _bookmark(3, name="Rose Pruning", url="https://garden.example.com/rose", domain="garden.example.com", category="待整理", folder=["Inbox"], description="garden rose pruning", keywords="garden,rose"),
+    ]
+    for bookmark in bookmarks:
+        bookmark["classification"].update(
+            {
+                "display_category": "待整理",
+                "resource_type": "文档",
+                "rule_confidence": 0.0,
+                "cluster_hints": ["Python" if "Python" in bookmark["name"] else "Garden"],
+                "confirmation_bucket": "rule_gap",
+                "review_required": False,
+            }
+        )
+    classified_file.write_text(
+        json.dumps({"schema_version": common_module.CLASSIFIED_OUTPUT_SCHEMA_VERSION, "bookmarks": bookmarks}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    config_file.write_text(
+        json.dumps(
+            {
+                "pipeline": {"classified_file": str(classified_file)},
+                "output": {"reports_directory": str(reports_dir)},
+                "clustering_options": {"min_cluster_size": 2, "max_bookmarks_without_clustering": 20},
+                "logging": {"file": str(tmp_path / "app.log"), "console": False},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        ["python3", "scripts/generate_taxonomy_bootstrap.py", "--config", str(config_file), "--max-clusters", "5"],
+        cwd=ROOT,
+        check=True,
+    )
+
+    clusters = json.loads((reports_dir / "taxonomy_bootstrap_clusters.json").read_text(encoding="utf-8"))
+    prompt = (reports_dir / "taxonomy_bootstrap_prompt.md").read_text(encoding="utf-8")
+    assert clusters["schema_version"] == common_module.TAXONOMY_BOOTSTRAP_CLUSTERS_SCHEMA_VERSION
+    assert clusters["clusters"]
+    assert clusters["clusters"][0]["cluster_id"].startswith("bc_")
+    assert "user_taxonomy_response/v1" in prompt
+    assert "不要把 GitHub" in prompt
+
+
+def test_apply_taxonomy_response_generates_files_and_classifier_uses_assignment(tmp_path):
+    clusters_file = tmp_path / "taxonomy_bootstrap_clusters.json"
+    response_file = tmp_path / "taxonomy_response.md"
+    taxonomy_file = tmp_path / "generated" / "user_taxonomy.json"
+    assignments_file = tmp_path / "generated" / "bookmark_taxonomy_assignments.json"
+    config_file = tmp_path / "skill_config.json"
+    identity = "https://example.com/python-packaging"
+    clusters_file.write_text(
+        json.dumps(
+            {
+                "schema_version": common_module.TAXONOMY_BOOTSTRAP_CLUSTERS_SCHEMA_VERSION,
+                "cluster_count": 1,
+                "clusters": [
+                    {
+                        "cluster_id": "bc_python",
+                        "bookmark_identities": [identity],
+                        "representative_bookmarks": [],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    response_file.write_text(
+        """```json
+{
+  "schema_version": "user_taxonomy_response/v1",
+  "root_groups": [{"name": "主要主题", "roots": ["学习"]}],
+  "categories": [
+    {
+      "path": "学习/Python",
+      "description": "Python 学习资料",
+      "aliases": ["python", "packaging"],
+      "title_patterns": ["[Pp]ython"],
+      "topic_domains": ["python.org"]
+    }
+  ],
+  "cluster_assignments": [{"cluster_id": "bc_python", "category": "学习/Python", "confidence": "high"}],
+  "uncategorized_cluster_ids": [],
+  "notes": []
+}
+```""",
+        encoding="utf-8",
+    )
+    config_file.write_text(
+        json.dumps(
+            {
+                "input": {
+                    "user_taxonomy_file": str(taxonomy_file),
+                    "bookmark_assignment_file": str(assignments_file),
+                },
+                "output": {
+                    "reports_directory": str(tmp_path / "reports"),
+                    "taxonomy_bootstrap_clusters_file": str(clusters_file),
+                },
+                "logging": {"file": str(tmp_path / "app.log"), "console": False},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        ["python3", "scripts/apply_taxonomy_response.py", "--config", str(config_file), "--response", str(response_file)],
+        cwd=ROOT,
+        check=True,
+    )
+
+    taxonomy = json.loads(taxonomy_file.read_text(encoding="utf-8"))
+    assignments = json.loads(assignments_file.read_text(encoding="utf-8"))
+    assert taxonomy["schema_version"] == common_module.USER_TAXONOMY_SCHEMA_VERSION
+    assert "学习/Python" in taxonomy["categories"]
+    assert assignments["assignments"][identity]["category"] == "学习/Python"
+
+    classifier = classify_module.BookmarkClassifier(user_taxonomy_file=taxonomy_file, assignment_file=assignments_file)
+    classification = classifier.classify_bookmark(
+        {
+            "id": "bookmark_python",
+            "name": "Python Packaging Guide",
+            "url": identity,
+            "domain": "example.com",
+            "original_folder_path": [],
+            "metadata": build_metadata("Python Packaging Guide", "", "python,packaging", "Example", "python packaging docs"),
+        }
+    )
+    assert classification["category"] == "学习/Python"
+    assert classification["confidence_components"]["llm_assignment_applied"] is True
+    assert classification["top_decision_drivers"][0]["driver"] == "llm_cluster_assignment"
+
+
+def test_apply_taxonomy_response_rejects_generic_platform_topic_domain(tmp_path):
+    clusters_payload = {"schema_version": common_module.TAXONOMY_BOOTSTRAP_CLUSTERS_SCHEMA_VERSION, "clusters": []}
+    clusters_file = tmp_path / "clusters.json"
+    clusters_file.write_text(json.dumps(clusters_payload), encoding="utf-8")
+    response_file = tmp_path / "response.json"
+    response_file.write_text(
+        json.dumps(
+            {
+                "schema_version": "user_taxonomy_response/v1",
+                "root_groups": [],
+                "categories": [{"path": "代码/GitHub", "topic_domains": ["github.com"], "aliases": [], "title_patterns": []}],
+                "cluster_assignments": [],
+                "uncategorized_cluster_ids": [],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    try:
+        response = apply_taxonomy_module.load_response_payload(response_file)
+        clusters = common_module.require_payload_schema(
+            json.loads(clusters_file.read_text(encoding="utf-8")),
+            common_module.TAXONOMY_BOOTSTRAP_CLUSTERS_SCHEMA_VERSION,
+            "clusters",
+            clusters_file,
+        )
+        category_rules, category_paths = apply_taxonomy_module.normalize_categories(response["categories"])
+        apply_taxonomy_module.build_assignments(response, clusters, category_paths)
+    except ValueError as exc:
+        assert "通用平台" in str(exc)
+    else:
+        raise AssertionError("expected generic platform topic domain to be rejected")
+
+
+def test_apply_taxonomy_response_escapes_literal_title_patterns():
+    categories, _ = apply_taxonomy_module.normalize_categories(
+        [
+            {
+                "path": "编程语言/C++",
+                "aliases": [],
+                "title_patterns": ["C++", "TLA+", "Spider 2.0", "Go"],
+                "topic_domains": [],
+            }
+        ]
+    )
+    patterns = categories["编程语言/C++"]["title_patterns"]
+
+    assert any(re.search(pattern, "Modern C++ Template Guide", re.IGNORECASE) for pattern in patterns)
+    assert any(re.search(pattern, "TLA+ video course", re.IGNORECASE) for pattern in patterns)
+    assert any(re.search(pattern, "Spider 2.0 benchmark", re.IGNORECASE) for pattern in patterns)
+    assert any(re.search(pattern, "Go runtime notes", re.IGNORECASE) for pattern in patterns)
+    assert not any(re.search(pattern, "Redistributing Tables", re.IGNORECASE) for pattern in patterns)
+    assert not any(re.search(pattern, "MongoDB guide", re.IGNORECASE) for pattern in patterns)
 
 
 def test_broken_links_report_export(tmp_path):
@@ -1163,7 +1375,7 @@ def test_cli_respects_config_and_creates_outputs(tmp_path):
     cfg.write_text(
         json.dumps(
             {
-                "input": {"bookmark_file": "../fixtures/sample_bookmarks.html", "rules_file": str(ROOT / 'data' / 'category_rules.json')},
+                "input": {"bookmark_file": "../fixtures/sample_bookmarks.html"},
                 "pipeline": {
                     "copied_bookmark_file": "../runtime/data/bookmarks.html",
                     "parsed_file": "../runtime/data/parsed.json",
@@ -1216,9 +1428,25 @@ def test_cli_respects_config_and_creates_outputs(tmp_path):
     assert (tmp_path / "runtime" / "logs" / "app.log").exists()
 
 
-def test_classifier_keeps_rule_and_open_topics_together():
-    rules_file = ROOT / "data" / "category_rules.json"
-    classifier = classify_module.BookmarkClassifier(rules_file)
+def test_classifier_keeps_generated_taxonomy_and_open_topics_together(tmp_path):
+    taxonomy_file = tmp_path / "user_taxonomy.json"
+    taxonomy_file.write_text(
+        json.dumps(
+            {
+                "schema_version": "user_taxonomy/v1",
+                "categories": {
+                    "数据库/PostgreSQL": {
+                        "domains": [],
+                        "keywords": ["postgresql", "postgres"],
+                        "title_patterns": ["[Pp]ostgreSQL", "[Pp]ostgres"],
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    classifier = classify_module.BookmarkClassifier(user_taxonomy_file=taxonomy_file)
     bookmark = {
         "id": "bookmark_mix",
         "name": "PostgreSQL + Neon branch workflow",
@@ -1237,55 +1465,31 @@ def test_classifier_keeps_rule_and_open_topics_together():
     assert any(candidate["topic"] == "Neon" for candidate in classification["open_topic_candidates"])
 
 
-def test_classifier_merges_rule_overrides_without_dropping_base_rules(tmp_path):
-    rules_file = tmp_path / "rules.json"
-    overrides_file = tmp_path / "rules_override.json"
-    rules_file.write_text(
+def test_classifier_uses_generated_taxonomy_without_rule_files(tmp_path):
+    taxonomy_file = tmp_path / "user_taxonomy.json"
+    taxonomy_file.write_text(
         json.dumps(
             {
-                "default_category": "其他/未分类",
-                "scoring": {
-                    "domain_weight": 40,
-                    "keyword_weight": 40,
-                    "title_weight": 40,
-                    "folder_weight": 20,
-                    "content_weight": 20,
-                    "min_score": 10,
-                    "confirm_threshold": 50,
-                },
-                "categories": {
-                    "编程语言/Python": {
-                        "domains": [],
-                        "keywords": ["python"],
-                        "title_patterns": ["[Pp]ython"],
-                        "folder_keywords": ["Python"],
-                    }
-                },
-                "resource_type_rules": {},
-                "intent_rules": {},
-                "quality_signal_rules": {},
-                "dynamic_topic_rules": {"cluster_hint_limit": 8},
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    overrides_file.write_text(
-        json.dumps(
-            {
+                "schema_version": "user_taxonomy/v1",
                 "categories": {
                     "编程语言/Python": {
                         "domains": ["neon.tech"],
-                        "keywords": ["packaging"],
-                    }
-                }
+                        "keywords": ["python", "packaging"],
+                        "title_patterns": ["[Pp]ython"],
+                    },
+                    "编程语言/Go": {
+                        "domains": ["go.dev"],
+                        "keywords": ["golang"],
+                        "title_patterns": ["[Gg]olang"],
+                    },
+                },
             },
             ensure_ascii=False,
         ),
         encoding="utf-8",
     )
 
-    classifier = classify_module.BookmarkClassifier(rules_file, overrides_file=overrides_file)
+    classifier = classify_module.BookmarkClassifier(user_taxonomy_file=taxonomy_file)
     domain_hit = classifier.classify_bookmark(
         {
             "id": "bookmark_override_domain",
@@ -1311,24 +1515,6 @@ def test_classifier_merges_rule_overrides_without_dropping_base_rules(tmp_path):
     assert any(item["signal"] == "domain" for item in domain_hit["classification_evidence"]["topic_scores"][0]["evidence"])
     assert keyword_hit["category"] == "编程语言/Python"
     assert any(item["signal"] == "keywords" for item in keyword_hit["classification_evidence"]["topic_scores"][0]["evidence"])
-
-    overrides_file.write_text(
-        json.dumps(
-            {
-                "topics": {
-                    "编程语言/Go": {
-                        "domains": ["go.dev"],
-                        "keywords": ["golang"],
-                        "title_patterns": ["[Gg]olang"],
-                        "folder_keywords": [],
-                    }
-                }
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    classifier = classify_module.BookmarkClassifier(rules_file, overrides_file=overrides_file)
     go_hit = classifier.classify_bookmark(
         {
             "id": "bookmark_topic_override",
@@ -1355,8 +1541,7 @@ def test_classifier_merges_rule_overrides_without_dropping_base_rules(tmp_path):
 
 
 def test_classifier_distinguishes_resource_types_within_same_topic():
-    rules_file = ROOT / "data" / "category_rules.json"
-    classifier = classify_module.BookmarkClassifier(rules_file)
+    classifier = classify_module.BookmarkClassifier()
     official_doc = {
         "id": "bookmark_doc",
         "name": "Kubernetes Documentation",
@@ -1383,8 +1568,10 @@ def test_classifier_distinguishes_resource_types_within_same_topic():
     }
     doc_classification = classifier.classify_bookmark(official_doc)
     blog_classification = classifier.classify_bookmark(community_blog)
-    assert "分布式系统/Kubernetes" in doc_classification["primary_topics"]
-    assert "分布式系统/Kubernetes" in blog_classification["primary_topics"]
+    assert doc_classification["category"] == "待整理"
+    assert blog_classification["category"] == "待整理"
+    assert doc_classification["primary_topics"] == []
+    assert blog_classification["primary_topics"] == []
     assert doc_classification["resource_type"] == "文档"
     assert blog_classification["resource_type"] == "博客"
     assert "官方" in doc_classification["quality_signals"]
@@ -1418,8 +1605,7 @@ def test_clusterer_prefers_classification_resource_type_when_metadata_lacks_it()
 
 
 def test_classifier_exports_open_topic_only_bookmarks_for_confirmation(tmp_path):
-    rules_file = ROOT / "data" / "category_rules.json"
-    classifier = classify_module.BookmarkClassifier(rules_file, {"confirm_threshold": 80})
+    classifier = classify_module.BookmarkClassifier(classification_options={"confirm_threshold": 80})
     bookmark = {
         "id": "bookmark_open_topic",
         "name": "AcmeFlow release notes",
@@ -1456,8 +1642,7 @@ def test_classifier_exports_open_topic_only_bookmarks_for_confirmation(tmp_path)
 
 
 def test_classifier_treats_folder_as_weak_prior_and_reports_low_confidence():
-    rules_file = ROOT / "data" / "category_rules.json"
-    classifier = classify_module.BookmarkClassifier(rules_file, {"confirm_threshold": 80})
+    classifier = classify_module.BookmarkClassifier(classification_options={"confirm_threshold": 80})
     bookmark = {
         "id": "bookmark_folder_bias",
         "name": "Kubernetes security hardening checklist",
@@ -1472,10 +1657,10 @@ def test_classifier_treats_folder_as_weak_prior_and_reports_low_confidence():
     }
     results, stats, _ = classifier.classify_all([bookmark])
     classification = results[0]["classification"]
-    assert "安全" in classification["primary_topics"]
-    assert "分布式系统/Kubernetes" in classification["secondary_topics"] or any(
-        item["topic"] == "分布式系统/Kubernetes" for item in classification["classification_evidence"]["topic_scores"]
-    )
+    assert classification["category"] == "待整理"
+    assert classification["primary_topics"] == []
+    assert classification["classification_evidence"]["topic_scores"] == []
+    assert any(candidate["topic"].lower() == "kubernetes" for candidate in classification["open_topic_candidates"])
     assert classification["folder_alignment_score"] == 0
     assert stats["low_confidence_normal_category_count"] == 0
     assert "resource_type_distribution" in stats
@@ -1483,8 +1668,7 @@ def test_classifier_treats_folder_as_weak_prior_and_reports_low_confidence():
 
 
 def test_classifier_ignores_stale_chrome_folder_for_topic_assignment():
-    rules_file = ROOT / "data" / "category_rules.json"
-    classifier = classify_module.BookmarkClassifier(rules_file)
+    classifier = classify_module.BookmarkClassifier()
     chrome_extension = {
         "id": "bookmark_chrome_extension",
         "name": "Chrome 扩展程序 | Chrome Extensions | Chrome for Developers",
@@ -1513,7 +1697,7 @@ def test_classifier_ignores_stale_chrome_folder_for_topic_assignment():
     chrome_classification = classifier.classify_bookmark(chrome_extension)
     go_classification = classifier.classify_bookmark(stackoverflow_go)
 
-    assert chrome_classification["category"] == "开发工具/Chrome扩展"
+    assert chrome_classification["category"] == "待整理"
     assert "数据库/TiDB" not in chrome_classification["primary_topics"]
     assert go_classification["category"] == "待整理"
     assert "数据库/TiDB" not in go_classification["primary_topics"]
@@ -1521,8 +1705,7 @@ def test_classifier_ignores_stale_chrome_folder_for_topic_assignment():
 
 
 def test_classifier_suppresses_generic_platform_open_topics():
-    rules_file = ROOT / "data" / "category_rules.json"
-    classifier = classify_module.BookmarkClassifier(rules_file)
+    classifier = classify_module.BookmarkClassifier()
     bookmark = {
         "id": "bookmark_generic_platform",
         "name": "GitHub - example/postgres-tool: PostgreSQL backup utility",
@@ -1549,8 +1732,7 @@ def test_classifier_suppresses_generic_platform_open_topics():
 
 
 def test_classifier_suppresses_source_like_generic_doc_tokens():
-    rules_file = ROOT / "data" / "category_rules.json"
-    classifier = classify_module.BookmarkClassifier(rules_file)
+    classifier = classify_module.BookmarkClassifier()
     bookmark = {
         "id": "bookmark_docs_qq",
         "name": "多机集群部署方式说明",
@@ -1578,9 +1760,7 @@ def test_classifier_suppresses_source_like_generic_doc_tokens():
     assert "腾讯文档" not in classification["cluster_hints"]
 
 
-def test_classifier_caps_untrusted_fetch_failures_to_tidy():
-    rules_file = ROOT / "data" / "category_rules.json"
-    classifier = classify_module.BookmarkClassifier(rules_file)
+def test_classifier_keeps_user_taxonomy_assignment_for_review_required_links(tmp_path):
     bookmark = {
         "id": "bookmark_untrusted_failure",
         "name": "TiDB Architecture Guide",
@@ -1600,20 +1780,57 @@ def test_classifier_caps_untrusted_fetch_failures_to_tidy():
             },
         },
     }
+    identity = common_module.build_signal_pack(bookmark)["identity"]["canonical_identity"]
+    assignments_file = tmp_path / "assignments.json"
+    assignments_file.write_text(
+        json.dumps(
+            {
+                "schema_version": common_module.BOOKMARK_TAXONOMY_ASSIGNMENTS_SCHEMA_VERSION,
+                "assignments": {
+                    identity: {
+                        "category": "数据库/TiDB",
+                        "confidence": 0.95,
+                        "source_cluster_id": "bc_test",
+                        "source": "llm_cluster_assignment",
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    classifier = classify_module.BookmarkClassifier(assignment_file=assignments_file)
 
     classification = classifier.classify_bookmark(bookmark)
 
-    assert classification["category"] == "待整理"
+    assert classification["category"] == "数据库/TiDB"
     assert classification["review_required"] is True
+    assert classification["needs_confirmation"] is True
     assert classification["confirmation_bucket"] == "fetch_blocked"
-    assert classification["rule_confidence"] <= 0.45
+    assert classification["rule_confidence"] == 0.95
     assert "待审阅" in classification["quality_signals"]
-    assert any(item["category"] == "数据库/TiDB" for item in classification["rule_candidates"])
+    assert classification["classification_evidence"]["llm_assignment"]["category"] == "数据库/TiDB"
+    assert classification["confidence_components"]["llm_assignment_applied"] is True
 
 
-def test_classifier_rules_cover_product_specific_database_families():
-    rules_file = ROOT / "data" / "category_rules.json"
-    classifier = classify_module.BookmarkClassifier(rules_file)
+def test_classifier_generated_taxonomy_rules_cover_product_specific_families(tmp_path):
+    taxonomy_file = tmp_path / "user_taxonomy.json"
+    taxonomy_file.write_text(
+        json.dumps(
+            {
+                "schema_version": "user_taxonomy/v1",
+                "categories": {
+                    "数据库/openGauss": {"domains": ["opengauss.org", "docs.opengauss.org"], "keywords": ["opengauss"], "title_patterns": ["openGauss"]},
+                    "数据库/DuckDB": {"domains": ["duckdb.org"], "keywords": ["duckdb"], "title_patterns": ["DuckDB"]},
+                    "数据库/BenchmarkSQL": {"domains": ["benchmarksql.readthedocs.io"], "keywords": ["benchmarksql", "tpc-c"], "title_patterns": ["BenchmarkSQL"]},
+                    "数据库/InfluxDB": {"domains": ["influxdata.com", "docs.influxdata.com"], "keywords": ["influxdb", "line protocol"], "title_patterns": ["InfluxDB"]},
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    classifier = classify_module.BookmarkClassifier(user_taxonomy_file=taxonomy_file)
 
     opengauss = classifier.classify_bookmark(
         {
@@ -1662,9 +1879,22 @@ def test_classifier_rules_cover_product_specific_database_families():
     assert influxdb["category"] == "数据库/InfluxDB"
 
 
-def test_classifier_rules_cover_operational_tool_families():
-    rules_file = ROOT / "data" / "category_rules.json"
-    classifier = classify_module.BookmarkClassifier(rules_file)
+def test_classifier_generated_taxonomy_rules_cover_operational_tool_families(tmp_path):
+    taxonomy_file = tmp_path / "user_taxonomy.json"
+    taxonomy_file.write_text(
+        json.dumps(
+            {
+                "schema_version": "user_taxonomy/v1",
+                "categories": {
+                    "DevOps/Ansible": {"domains": ["ansible.com", "ansible.com.cn"], "keywords": ["ansible", "playbook"], "title_patterns": ["Ansible"]},
+                    "开发工具/Chrome扩展": {"domains": ["developer.chrome.com"], "keywords": ["chrome extension", "manifest v3"], "title_patterns": ["Chrome Extensions", "Manifest V3"]},
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    classifier = classify_module.BookmarkClassifier(user_taxonomy_file=taxonomy_file)
 
     ansible = classifier.classify_bookmark(
         {
@@ -1691,9 +1921,8 @@ def test_classifier_rules_cover_operational_tool_families():
     assert chrome_extension["category"] == "开发工具/Chrome扩展"
 
 
-def test_classifier_uses_general_reading_topic_without_personal_rules():
-    rules_file = ROOT / "data" / "category_rules.json"
-    classifier = classify_module.BookmarkClassifier(rules_file)
+def test_classifier_keeps_general_reading_as_open_topic_without_personal_rules():
+    classifier = classify_module.BookmarkClassifier()
     bookmark = {
         "id": "bookmark_gutenberg",
         "name": "Free eBooks | Project Gutenberg",
@@ -1713,9 +1942,10 @@ def test_classifier_uses_general_reading_topic_without_personal_rules():
 
     classification = classifier.classify_bookmark(bookmark)
 
-    assert classification["category"] == "阅读资料"
-    assert classification["rule_confidence"] >= 0.65
-    assert "阅读资料" in classification["primary_topics"]
+    assert classification["category"] == "待整理"
+    assert classification["rule_confidence"] == 0
+    assert classification["primary_topics"] == []
+    assert classification["open_topic_candidates"]
 
 
 def test_rule_suggestions_do_not_bind_generic_platform_domains():
@@ -1743,6 +1973,35 @@ def test_rule_suggestions_do_not_bind_generic_platform_domains():
     assert report["count"] == 1
     assert report["suggestions"][0]["proposed_domains"] == []
     assert report["suggestions"][0]["type"] == "create_topic"
+
+
+def test_rule_suggestions_filter_public_suffix_and_invalid_domains():
+    report = cluster_module.generate_rule_suggestions(
+        [
+            {
+                "cluster_id": "cluster_domain_noise",
+                "cluster_label": "RocksDB",
+                "rule_purity": 0.72,
+                "destination_root": "发现主题",
+                "dominant_categories": [{"category": "数据库/RocksDB", "root": "数据库", "count": 4, "share": 1.0}],
+                "top_domains": [
+                    {"domain": "org.cn", "count": 2, "share": 0.5},
+                    {"domain": "https_redis.io", "count": 1, "share": 0.25},
+                    {"domain": "rocksdb.org", "count": 1, "share": 0.25},
+                ],
+                "representative_tokens": ["rocksdb"],
+                "discovered_topics": ["RocksDB"],
+                "bookmarks": [
+                    {"id": f"bookmark_{index}", "name": f"RocksDB {index}", "url": f"https://rocksdb.org/{index}", "domain": "rocksdb.org", "classification": {"category": "数据库/RocksDB"}}
+                    for index in range(4)
+                ],
+            }
+        ],
+        discovery_root_name="发现主题",
+    )
+
+    assert report["suggestions"][0]["type"] == "add_specific_domain"
+    assert report["suggestions"][0]["proposed_domains"] == ["rocksdb.org"]
 
 
 def test_quality_report_tracks_folder_and_generic_domain_metrics():
@@ -1916,8 +2175,153 @@ def test_same_label_clusters_are_merged_instead_of_suffix_spam():
     ]
     hierarchy = clusterer.build_hierarchy(bookmarks, "编程/Python Web", threshold=1)
     names = sorted(hierarchy["subcategories"].keys())
-    assert names == ["编程/Python Web/FastAPI"]
+    assert [name.lower() for name in names] == ["编程/python web/fastapi"]
     assert hierarchy["subcategories"][names[0]]["count"] == 4
+
+
+def test_build_clustered_root_hierarchy_does_not_mutate_cluster_profiles():
+    clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2)
+    bookmarks = [
+        _bookmark(1, name="PostgreSQL Docs", url="https://postgresql.org/docs", domain="postgresql.org", category="数据库/PostgreSQL", folder=["学习", "PostgreSQL"]),
+        _bookmark(2, name="PostgreSQL Wiki", url="https://wiki.postgresql.org", domain="wiki.postgresql.org", category="数据库/PostgreSQL", folder=["学习", "PostgreSQL"]),
+    ]
+    for bookmark in bookmarks:
+        bookmark["classification"].update(
+            {
+                "display_category": "数据库/PostgreSQL",
+                "resource_type": "文档",
+                "rule_confidence": 0.93,
+                "rule_roots": [{"root": "数据库", "support": 1.0, "total": 90.0}],
+                "cluster_hints": ["PostgreSQL"],
+            }
+        )
+    profiles = [
+        {
+            "cluster_id": "cluster_0001",
+            "cluster_label": "PostgreSQL",
+            "cluster_reason": "fixture",
+            "destination_root": "数据库",
+            "dominant_categories": [{"category": "数据库/PostgreSQL", "root": "数据库", "count": 1, "share": 1.0}],
+            "dominant_rule_roots": [{"root": "数据库", "score": 1.0, "support": 1.0}],
+            "discovered_topics": ["PostgreSQL"],
+            "representative_tokens": ["postgresql"],
+            "source_folder_reused": False,
+            "source_folder_quality_score": 0.0,
+            "size_below_threshold": True,
+            "bookmarks": [bookmarks[0]],
+        },
+        {
+            "cluster_id": "cluster_0002",
+            "cluster_label": "PostgreSQL",
+            "cluster_reason": "fixture",
+            "destination_root": "数据库",
+            "dominant_categories": [{"category": "数据库/PostgreSQL", "root": "数据库", "count": 1, "share": 1.0}],
+            "dominant_rule_roots": [{"root": "数据库", "score": 1.0, "support": 1.0}],
+            "discovered_topics": ["PostgreSQL"],
+            "representative_tokens": ["postgresql"],
+            "source_folder_reused": False,
+            "source_folder_quality_score": 0.0,
+            "size_below_threshold": True,
+            "bookmarks": [bookmarks[1]],
+        },
+    ]
+    before = [(profile["cluster_id"], [bookmark["id"] for bookmark in profile["bookmarks"]]) for profile in profiles]
+
+    hierarchy = cluster_module.build_clustered_root_hierarchy(clusterer, profiles, threshold=20)
+
+    after = [(profile["cluster_id"], [bookmark["id"] for bookmark in profile["bookmarks"]]) for profile in profiles]
+    assert before == after
+    assert hierarchy["数据库"]["subcategories"]["PostgreSQL"]["count"] == 2
+
+
+def test_generic_repo_cluster_label_uses_repo_not_owner_or_broad_leaf():
+    clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2, generic_platform_domains={"github.com"})
+    bookmark = _bookmark(
+        1,
+        name="Home · alibaba/tair Wiki",
+        url="https://github.com/alibaba/tair/wiki",
+        domain="github.com",
+        category="机器学习/AI",
+        folder=["代码"],
+        resource_type="仓库",
+        description="tair high performance cache storage project",
+        keywords="tair,cache,storage",
+    )
+    bookmark["classification"].update(
+        {
+            "display_category": "机器学习/AI",
+            "resource_type": "仓库",
+            "rule_confidence": 0.91,
+            "rule_roots": [{"root": "机器学习", "support": 1.0, "total": 90.0}],
+            "cluster_hints": ["Alibaba", "Tair", "AI"],
+        }
+    )
+
+    label = clusterer._cluster_display_name([bookmark], "机器学习/AI")
+
+    assert label.lower() == "tair"
+    assert "alibaba" not in label.lower()
+
+
+def test_platform_slogan_is_not_used_as_generic_platform_cluster_label():
+    clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2, generic_platform_domains={"jianshu.com"})
+    bookmarks = [
+        _bookmark(
+            index,
+            name=f"PostgreSQL Executor {index} - 简书",
+            url=f"https://www.jianshu.com/p/postgres-{index}",
+            domain="www.jianshu.com",
+            category="数据库/PostgreSQL",
+            folder=["数据库"],
+            description="创作你的创作 PostgreSQL executor internals",
+            keywords="postgresql,executor",
+        )
+        for index in range(1, 3)
+    ]
+    for bookmark in bookmarks:
+        bookmark["classification"].update(
+            {
+                "display_category": "数据库/PostgreSQL",
+                "resource_type": "博客",
+                "rule_confidence": 0.9,
+                "rule_roots": [{"root": "数据库", "support": 1.0, "total": 90.0}],
+                "cluster_hints": ["创作你的创作", "PostgreSQL"],
+            }
+        )
+
+    label = clusterer._cluster_display_name(bookmarks, "数据库/PostgreSQL")
+    tokens = clusterer._representative_tokens(bookmarks)
+
+    assert label == "PostgreSQL"
+    assert "创作你的创作" not in tokens
+
+
+def test_generic_platform_small_mixed_cluster_splits_by_high_confidence_category():
+    clusterer = cluster_module.BookmarkClusterer(min_cluster_size=10, generic_platform_domains={"github.com"})
+    bookmarks = [
+        _bookmark(1, name="rocksdb compaction", url="https://github.com/facebook/rocksdb/wiki/Compaction", domain="github.com", category="数据库/RocksDB", folder=["代码"], resource_type="仓库", description="rocksdb compaction storage engine", keywords="rocksdb,compaction"),
+        _bookmark(2, name="parquet cpp", url="https://github.com/apache/parquet-cpp", domain="github.com", category="编程语言/C-C++", folder=["代码"], resource_type="仓库", description="parquet cpp columnar format", keywords="cpp,parquet"),
+        _bookmark(3, name="llm cache", url="https://github.com/alibaba/tair-kvcache", domain="github.com", category="机器学习/AI", folder=["代码"], resource_type="仓库", description="llm inference cache", keywords="llm,cache"),
+    ]
+    for bookmark in bookmarks:
+        category = bookmark["classification"]["category"]
+        bookmark["classification"].update(
+            {
+                "display_category": category,
+                "resource_type": "仓库",
+                "rule_confidence": 0.9,
+                "rule_roots": [{"root": category.split("/")[0], "support": 1.0, "total": 90.0}],
+                "cluster_hints": [category.split("/")[-1]],
+            }
+        )
+    clusterer._connected_components = lambda bookmarks, features, threshold=0.34: [bookmarks]
+    clusterer._split_if_needed = lambda clusters: clusters
+    clusterer._merge_if_needed = lambda clusters: clusters
+
+    clusters = clusterer.cluster_bookmarks(bookmarks)
+
+    assert sorted(len(cluster) for cluster in clusters) == [1, 1, 1]
+    assert len({cluster[0]["classification"]["category"] for cluster in clusters}) == 3
 
 
 def test_build_root_hierarchy_preserves_leaf_categories_without_suffix_spam():
@@ -1977,13 +2381,64 @@ def test_build_display_hierarchy_groups_top_level_roots_for_human_browsing():
         common_module.DEFAULT_DISPLAY_OPTIONS,
     )
 
-    assert list(display_hierarchy) == ["技术主题"]
-    assert set(display_hierarchy["技术主题"]["subcategories"]) == {"数据库", "编程语言"}
-    assert "PostgreSQL" in display_hierarchy["技术主题"]["subcategories"]["数据库"]["subcategories"]
-    assert "Python" in display_hierarchy["技术主题"]["subcategories"]["编程语言"]["subcategories"]
+    assert list(display_hierarchy) == ["主要主题"]
+    assert set(display_hierarchy["主要主题"]["subcategories"]) == {"数据库", "编程语言"}
+    assert "PostgreSQL" in display_hierarchy["主要主题"]["subcategories"]["数据库"]["subcategories"]
+    assert "Python" in display_hierarchy["主要主题"]["subcategories"]["编程语言"]["subcategories"]
 
     html = html_module.BookmarkHTMLGenerator().generate_html(display_hierarchy)
     assert html.find("数据库") < html.find("编程语言")
+
+
+def test_build_display_hierarchy_can_auto_group_actual_roots_without_profile_config():
+    clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2)
+    root_hierarchy = {
+        "园艺": {
+            "name": "园艺",
+            "category": "园艺",
+            "bookmarks": [
+                _bookmark(1, name="Rose pruning", url="https://example.com/rose", domain="example.com", category="园艺", folder=["园艺"]),
+                _bookmark(2, name="Compost guide", url="https://example.com/compost", domain="example.com", category="园艺", folder=["园艺"]),
+            ],
+            "subcategories": {},
+            "count": 2,
+        },
+        "食谱": {
+            "name": "食谱",
+            "category": "食谱",
+            "bookmarks": [
+                _bookmark(3, name="Pasta", url="https://example.com/pasta", domain="example.com", category="食谱", folder=["食谱"]),
+                _bookmark(4, name="Soup", url="https://example.com/soup", domain="example.com", category="食谱", folder=["食谱"]),
+                _bookmark(5, name="Bread", url="https://example.com/bread", domain="example.com", category="食谱", folder=["食谱"]),
+            ],
+            "subcategories": {},
+            "count": 3,
+        },
+        "待整理": {
+            "name": "待整理",
+            "category": "待整理",
+            "bookmarks": [_bookmark(6, name="Unknown", url="https://example.com/unknown", domain="example.com", category="待整理", folder=["待整理"])],
+            "subcategories": {},
+            "count": 1,
+        },
+        "发现主题": {
+            "name": "发现主题",
+            "category": "发现主题",
+            "bookmarks": [_bookmark(7, name="New topic", url="https://example.com/topic", domain="example.com", category="发现主题", folder=["发现主题"])],
+            "subcategories": {},
+            "count": 1,
+        },
+    }
+
+    display_hierarchy = cluster_module.build_display_hierarchy(
+        clusterer,
+        root_hierarchy,
+        [],
+        common_module.DEFAULT_DISPLAY_OPTIONS,
+    )
+
+    assert list(display_hierarchy) == ["主要主题", "待整理", "发现主题"]
+    assert set(display_hierarchy["主要主题"]["subcategories"]) == {"园艺", "食谱"}
 
 
 def test_build_display_hierarchy_does_not_duplicate_discovery_root_when_already_grouped():
@@ -2019,7 +2474,6 @@ def test_reset_pipeline_outputs_keeps_source_bookmark_file(tmp_path):
             {
                 "input": {
                     "bookmark_file": "bookmarks.html",
-                    "rules_file": str(ROOT / "data" / "category_rules.json"),
                 },
                 "pipeline": {
                     "copied_bookmark_file": "bookmarks.html",

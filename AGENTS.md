@@ -62,7 +62,7 @@ Keep these invariants unless the user explicitly asks for a different product be
 - review-required links should be mirrored to `待审阅`
 - generic platforms should not become topic evidence by domain alone
 - reports should explain why output needs review or rule improvement
-- generated state should stay ignored; source rules and docs should be tracked
+- generated taxonomy and runtime state should stay ignored; source code and docs should be tracked
 
 ## Generic Platform Policy
 
@@ -134,7 +134,7 @@ scripts/4_classify_bookmarks.py
 
 Responsibilities:
 
-- load and merge default rules plus overrides
+- load the generic base contract plus generated user taxonomy when present
 - build or consume `signal_pack/v2`
 - score rule categories
 - infer resource type, intent labels, and quality signals
@@ -144,7 +144,7 @@ Responsibilities:
 
 When improving classification:
 
-- prefer precise domain rules for topic-specific domains
+- prefer precise generated taxonomy domains for topic-specific domains
 - prefer title patterns and narrow aliases for stable product/project names
 - prefer content and metadata signals over folder names
 - keep operational fetch terms out of topic extraction
@@ -183,27 +183,28 @@ Current known pain points:
 - mixed clusters that should split earlier
 - flat normal roots and high direct-bookmark share in some roots
 
-## Rule Files
+## Generated Taxonomy
 
-Default rules:
+The repository no longer tracks default category rule files. The checked-in base
+classifier only provides generic resource, intent, quality, dynamic-topic, and
+generic-platform guardrails.
 
-```text
-data/category_rules.json
-```
-
-Local extensions:
+Generated user-specific constraints live under ignored paths:
 
 ```text
-data/category_rules_overrides.json
+data/generated/user_taxonomy.json
+data/generated/bookmark_taxonomy_assignments.json
 ```
 
 Preferred workflow:
 
-1. run pipeline
-2. inspect `rule_suggestions.json`, `quality_report.json`, and `signal_audit.json`
-3. add narrow overrides or aliases
-4. rerun steps 4, 5, 6
-5. validate tests and quality metrics
+1. run the pipeline or `./organize.sh data/bookmarks.html skill_config.json --bootstrap-taxonomy`
+2. give `output/reports/taxonomy_bootstrap_prompt.md` to an external LLM
+3. save the strict JSON response as `data/generated/taxonomy_response.json`
+4. run `python3 scripts/apply_taxonomy_response.py --config skill_config.json --response data/generated/taxonomy_response.json`
+5. rerun steps 4, 5, 6
+6. inspect `rule_suggestions.json`, `quality_report.json`, and `signal_audit.json`
+7. validate tests and quality metrics
 
 ## Command Policy
 
@@ -236,8 +237,8 @@ python3 scripts/6_generate_html.py --config skill_config.json
 Before handing work back:
 
 ```bash
-python3 -m py_compile scripts/common.py scripts/1_copy_bookmark.py scripts/2_parse_bookmarks.py scripts/3_fetch_webpage_info.py scripts/4_classify_bookmarks.py scripts/5_cluster_bookmarks.py scripts/6_generate_html.py scripts/reset_pipeline_state.py
-python3 -c "import json; [json.load(open(path)) for path in ['data/category_rules.json','data/category_rules_overrides.json','skill_config.json']]"
+python3 -m py_compile scripts/common.py scripts/1_copy_bookmark.py scripts/2_parse_bookmarks.py scripts/3_fetch_webpage_info.py scripts/4_classify_bookmarks.py scripts/5_cluster_bookmarks.py scripts/6_generate_html.py scripts/generate_taxonomy_bootstrap.py scripts/apply_taxonomy_response.py scripts/reset_pipeline_state.py
+python3 -c "import json; json.load(open('skill_config.json'))"
 pytest -q
 git diff --check
 ```
@@ -277,7 +278,7 @@ For temporary verification outputs, use the same files under `/tmp` and report t
 ## Common Safe Improvements
 
 - add a new structured signal to `signal_pack`
-- add a narrow topic alias or domain override
+- add a narrow topic alias, title pattern, assignment, or domain through generated taxonomy
 - add a regression test for misclassification
 - adjust generic-platform token filtering
 - improve cluster destination routing from weak evidence to `待整理` or `发现主题`
