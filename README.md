@@ -172,6 +172,7 @@ Reports:
 
 - `output/reports/duplicates.json`
 - `output/reports/broken_links.json`
+- `output/reports/fetch_hotspots.json`
 - `output/reports/needs_confirmation.json`
 - `output/reports/review_queue.json`
 - `output/reports/rule_suggestions.json`
@@ -212,7 +213,7 @@ Core sections:
 - `input`: source bookmark path plus optional generated taxonomy/assignment files
 - `pipeline`: intermediate file paths
 - `output`: final HTML and report paths
-- `fetch_options`: concurrency, timeout, retry, cache, proxy, trusted-access policy
+- `fetch_options`: concurrency, timeout, retry, cache, proxy, trusted-access policy, optional `domain_overrides`
 - `classification_options`: scoring weights and confidence thresholds
 - `clustering_options`: cluster thresholds, generic platforms, display groups
 - `logging`: log level and log file
@@ -253,6 +254,20 @@ Taxonomy guidance:
 - keep broad source platforms out of topic domains
 - validate taxonomy additions with `taxonomy_bootstrap_clusters.json`, `quality_report.json`, and tests
 
+For a later large one-shot `rule_gap` follow-up without adding any in-repo API dependency:
+
+```bash
+python3 scripts/generate_taxonomy_followup.py --config skill_config.json
+python3 scripts/apply_taxonomy_response.py --config skill_config.json --response data/generated/taxonomy_followup_response.json --clusters output/reports/taxonomy_followup_candidates.json --merge-existing
+python3 scripts/4_classify_bookmarks.py --config skill_config.json
+python3 scripts/5_cluster_bookmarks.py --config skill_config.json
+python3 scripts/6_generate_html.py --config skill_config.json
+```
+
+This produces `taxonomy_followup_prompt.md` and `taxonomy_followup_candidates.json`
+for your own external LLM or code agent. Save the strict JSON response locally,
+then merge it back with `--merge-existing`.
+
 ## Run Modes
 
 Normal run:
@@ -290,7 +305,7 @@ Remove all generated pipeline state and rebuild:
 Before committing code or rule changes:
 
 ```bash
-python3 -m py_compile scripts/common.py scripts/1_copy_bookmark.py scripts/2_parse_bookmarks.py scripts/3_fetch_webpage_info.py scripts/4_classify_bookmarks.py scripts/5_cluster_bookmarks.py scripts/6_generate_html.py scripts/generate_taxonomy_bootstrap.py scripts/apply_taxonomy_response.py scripts/reset_pipeline_state.py
+python3 -m py_compile scripts/common.py scripts/1_copy_bookmark.py scripts/2_parse_bookmarks.py scripts/3_fetch_webpage_info.py scripts/4_classify_bookmarks.py scripts/5_cluster_bookmarks.py scripts/6_generate_html.py scripts/generate_taxonomy_bootstrap.py scripts/generate_taxonomy_followup.py scripts/apply_taxonomy_response.py scripts/reset_pipeline_state.py
 python3 -c "import json; json.load(open('skill_config.json'))"
 pytest -q
 git diff --check
@@ -302,6 +317,7 @@ After a real run, inspect:
 - `output/reports/rule_suggestions.json`
 - `output/reports/signal_audit.json`
 - `output/reports/review_queue.json`
+- `output/reports/fetch_hotspots.json`
 
 Important metrics:
 

@@ -68,6 +68,7 @@ conda run -n base ./organize.sh data/bookmarks.html skill_config.json
 | Want to discard all generated state | `./organize.sh data/bookmarks.html skill_config.json --reset-all` |
 | Need a first-pass taxonomy prompt | `./organize.sh data/bookmarks.html skill_config.json --bootstrap-taxonomy` |
 | Applied external taxonomy response | `python3 scripts/apply_taxonomy_response.py --config skill_config.json --response data/generated/taxonomy_response.json`, then rerun steps 4, 5, 6 |
+| Need a one-shot `rule_gap` follow-up package | `python3 scripts/generate_taxonomy_followup.py --config skill_config.json` |
 | Changed generated taxonomy or classification logic | rerun steps 4, 5, 6 |
 | Changed only clustering/display logic | rerun steps 5, 6 |
 | Changed only HTML generation | rerun step 6 |
@@ -88,6 +89,7 @@ data/clustering_result.json
 output/organized_bookmarks.html
 output/reports/duplicates.json
 output/reports/broken_links.json
+output/reports/fetch_hotspots.json
 output/reports/needs_confirmation.json
 output/reports/review_queue.json
 output/reports/rule_suggestions.json
@@ -198,6 +200,32 @@ data/generated/bookmark_taxonomy_assignments.json
 External `title_patterns` are treated as literal phrases by default. Use object
 form such as `{"regex": "..."}` only when a real regular expression is intended.
 
+## Taxonomy Follow-up
+
+When the first generated taxonomy still leaves many `rule_gap` items in `待整理`,
+produce a single larger follow-up package instead of many small API calls:
+
+```bash
+python3 scripts/generate_taxonomy_followup.py --config skill_config.json
+```
+
+This writes:
+
+```text
+output/reports/taxonomy_followup_candidates.json
+output/reports/taxonomy_followup_prompt.md
+```
+
+Give those files to your own external LLM or code agent. Save the strict JSON
+response as `data/generated/taxonomy_followup_response.json`, then merge it:
+
+```bash
+python3 scripts/apply_taxonomy_response.py --config skill_config.json --response data/generated/taxonomy_followup_response.json --clusters output/reports/taxonomy_followup_candidates.json --merge-existing
+python3 scripts/4_classify_bookmarks.py --config skill_config.json
+python3 scripts/5_cluster_bookmarks.py --config skill_config.json
+python3 scripts/6_generate_html.py --config skill_config.json
+```
+
 Proxy-first fetch with built-in direct retry:
 
 ```bash
@@ -285,6 +313,22 @@ This includes:
 
 Trusted-access policy is disabled by default. If a local config enables it, keep
 site rules narrow and document why review suppression is acceptable.
+
+### `fetch_hotspots.json`
+
+Fetch-review hotspots grouped by domain.
+
+Current sections include:
+
+- `review_count`
+- `reason_codes`
+- `routes`
+- `pass_deltas`
+- `representative_urls`
+
+Use this before changing fetch behavior. If the same domains dominate review
+traffic, prefer narrow `fetch_options.domain_overrides` or transport tuning over
+taxonomy changes.
 
 ### `needs_confirmation.json`
 
@@ -412,6 +456,7 @@ If the fetch cache is stale:
 If the failures are concentrated on a few domains, inspect:
 
 - `output/reports/review_queue.json`
+- `output/reports/fetch_hotspots.json`
 - `output/reports/quality_report.json`
 - `TODO_RUNTIME_FOLLOWUP.md`
 
@@ -449,7 +494,7 @@ Avoid adding `github.com`, `csdn.net`, `zhihu.com`, `docs.qq.com`, or similar br
 ## Validation Before Commit
 
 ```bash
-python3 -m py_compile scripts/common.py scripts/1_copy_bookmark.py scripts/2_parse_bookmarks.py scripts/3_fetch_webpage_info.py scripts/4_classify_bookmarks.py scripts/5_cluster_bookmarks.py scripts/6_generate_html.py scripts/generate_taxonomy_bootstrap.py scripts/apply_taxonomy_response.py scripts/reset_pipeline_state.py
+python3 -m py_compile scripts/common.py scripts/1_copy_bookmark.py scripts/2_parse_bookmarks.py scripts/3_fetch_webpage_info.py scripts/4_classify_bookmarks.py scripts/5_cluster_bookmarks.py scripts/6_generate_html.py scripts/generate_taxonomy_bootstrap.py scripts/generate_taxonomy_followup.py scripts/apply_taxonomy_response.py scripts/reset_pipeline_state.py
 python3 -c "import json; json.load(open('skill_config.json'))"
 pytest -q
 git diff --check

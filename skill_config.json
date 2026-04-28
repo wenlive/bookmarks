@@ -17,11 +17,14 @@
     "broken_links_report_file": "output/reports/broken_links.json",
     "confirmation_report_file": "output/reports/needs_confirmation.json",
     "review_report_file": "output/reports/review_queue.json",
+    "fetch_hotspots_report_file": "output/reports/fetch_hotspots.json",
     "rule_suggestions_report_file": "output/reports/rule_suggestions.json",
     "quality_report_file": "output/reports/quality_report.json",
     "signal_audit_report_file": "output/reports/signal_audit.json",
     "taxonomy_bootstrap_prompt_file": "output/reports/taxonomy_bootstrap_prompt.md",
-    "taxonomy_bootstrap_clusters_file": "output/reports/taxonomy_bootstrap_clusters.json"
+    "taxonomy_bootstrap_clusters_file": "output/reports/taxonomy_bootstrap_clusters.json",
+    "taxonomy_followup_prompt_file": "output/reports/taxonomy_followup_prompt.md",
+    "taxonomy_followup_candidates_file": "output/reports/taxonomy_followup_candidates.json"
   },
   "fetch_options": {
     "concurrent_limit": 15,
@@ -32,6 +35,7 @@
     "force_refetch": false,
     "cache_file": "data/bookmarks_with_info.json",
     "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+    "domain_overrides": {},
     "proxy": {
       "enabled": false,
       "trust_env": false,

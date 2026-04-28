@@ -77,6 +77,19 @@ python3 scripts/6_generate_html.py --config skill_config.json
 python3 scripts/apply_taxonomy_response.py --config skill_config.json --response data/generated/taxonomy_response.json
 ```
 
+## Taxonomy Follow-up
+
+```bash
+# Generate one larger rule-gap follow-up package for your own external LLM or code agent.
+python3 scripts/generate_taxonomy_followup.py --config skill_config.json
+
+# Merge the strict JSON response back into the generated taxonomy and assignments.
+python3 scripts/apply_taxonomy_response.py --config skill_config.json --response data/generated/taxonomy_followup_response.json --clusters output/reports/taxonomy_followup_candidates.json --merge-existing
+python3 scripts/4_classify_bookmarks.py --config skill_config.json
+python3 scripts/5_cluster_bookmarks.py --config skill_config.json
+python3 scripts/6_generate_html.py --config skill_config.json
+```
+
 ## Key Files
 
 | Path | Meaning |
@@ -95,6 +108,7 @@ python3 scripts/apply_taxonomy_response.py --config skill_config.json --response
 ```text
 output/reports/duplicates.json
 output/reports/broken_links.json
+output/reports/fetch_hotspots.json
 output/reports/needs_confirmation.json
 output/reports/review_queue.json
 output/reports/rule_suggestions.json
@@ -102,11 +116,14 @@ output/reports/quality_report.json
 output/reports/signal_audit.json
 output/reports/taxonomy_bootstrap_prompt.md
 output/reports/taxonomy_bootstrap_clusters.json
+output/reports/taxonomy_followup_prompt.md
+output/reports/taxonomy_followup_candidates.json
 ```
 
 ## Report Meanings
 
 - `broken_links.json`: HTTP-broken rows only
+- `fetch_hotspots.json`: domain-level fetch review hotspots plus proxy/direct pass deltas
 - `review_queue.json`: all review-required fetch outcomes
 - `needs_confirmation.json`: rule-gap, fetch-blocked, or low-confidence classification output
 - `rule_suggestions.json`: `add_alias`, `add_specific_domain`, `create_topic`, `split_mixed_cluster`, `investigate_fetch_failures`
@@ -116,7 +133,7 @@ output/reports/taxonomy_bootstrap_clusters.json
 ## Quality Check
 
 ```bash
-python3 -m py_compile scripts/common.py scripts/1_copy_bookmark.py scripts/2_parse_bookmarks.py scripts/3_fetch_webpage_info.py scripts/4_classify_bookmarks.py scripts/5_cluster_bookmarks.py scripts/6_generate_html.py scripts/generate_taxonomy_bootstrap.py scripts/apply_taxonomy_response.py scripts/reset_pipeline_state.py
+python3 -m py_compile scripts/common.py scripts/1_copy_bookmark.py scripts/2_parse_bookmarks.py scripts/3_fetch_webpage_info.py scripts/4_classify_bookmarks.py scripts/5_cluster_bookmarks.py scripts/6_generate_html.py scripts/generate_taxonomy_bootstrap.py scripts/generate_taxonomy_followup.py scripts/apply_taxonomy_response.py scripts/reset_pipeline_state.py
 python3 -c "import json; json.load(open('skill_config.json'))"
 pytest -q
 git diff --check

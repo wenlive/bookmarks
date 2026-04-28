@@ -20,9 +20,11 @@ CLUSTERING_OUTPUT_SCHEMA_VERSION = "clustering_output/v2"
 SIGNAL_AUDIT_SCHEMA_VERSION = "signal_audit/v1"
 SIGNAL_PACK_SCHEMA_VERSION = "signal_pack/v2"
 TAXONOMY_BOOTSTRAP_CLUSTERS_SCHEMA_VERSION = "taxonomy_bootstrap_clusters/v1"
+TAXONOMY_FOLLOWUP_CANDIDATES_SCHEMA_VERSION = "taxonomy_followup_candidates/v1"
 USER_TAXONOMY_RESPONSE_SCHEMA_VERSION = "user_taxonomy_response/v1"
 USER_TAXONOMY_SCHEMA_VERSION = "user_taxonomy/v1"
 BOOKMARK_TAXONOMY_ASSIGNMENTS_SCHEMA_VERSION = "bookmark_taxonomy_assignments/v1"
+FETCH_HOTSPOTS_SCHEMA_VERSION = "fetch_hotspots/v1"
 DEFAULT_TRUSTED_ACCESS_POLICY = {
     "enabled": False,
     "domain_suffixes": [],
@@ -131,8 +133,10 @@ NOISY_TOPIC_TOKENS = {
         "guide",
         "home",
         "homepage",
+        "homepages",
         "index",
         "latest",
+        "management",
         "official",
         "overview",
         "page",
@@ -149,6 +153,8 @@ NOISY_TOPIC_TOKENS = {
         "search",
         "searches",
         "source",
+        "standard",
+        "standards",
         "stable",
         "tool",
         "tools",
@@ -156,6 +162,10 @@ NOISY_TOPIC_TOKENS = {
         "user",
         "webpage",
         "wiki",
+        "question",
+        "questions",
+        "breadcrumblist",
+        "openaidevelopers",
         "atomgit",
         "csdn博客",
         "it技术",
@@ -172,6 +182,8 @@ NOISY_TOPIC_TOKENS = {
         "文档中心",
         "会员",
         "社区",
+        "开发者的网上家园",
+        "支持多人在线编辑",
         "知乎",
         "简书",
         "腾讯文档",
@@ -276,11 +288,14 @@ class PipelinePaths:
     broken_links_report_file: Path
     confirmation_report_file: Path
     review_report_file: Path
+    fetch_hotspots_report_file: Path
     rule_suggestions_report_file: Path
     quality_report_file: Path
     signal_audit_report_file: Path
     taxonomy_bootstrap_prompt_file: Path
     taxonomy_bootstrap_clusters_file: Path
+    taxonomy_followup_prompt_file: Path
+    taxonomy_followup_candidates_file: Path
 
 
 class JsonFormatter(logging.Formatter):
@@ -304,11 +319,14 @@ DEFAULT_PATHS = {
     "broken_links_report_file": ROOT_DIR / "output" / "reports" / "broken_links.json",
     "confirmation_report_file": ROOT_DIR / "output" / "reports" / "needs_confirmation.json",
     "review_report_file": ROOT_DIR / "output" / "reports" / "review_queue.json",
+    "fetch_hotspots_report_file": ROOT_DIR / "output" / "reports" / "fetch_hotspots.json",
     "rule_suggestions_report_file": ROOT_DIR / "output" / "reports" / "rule_suggestions.json",
     "quality_report_file": ROOT_DIR / "output" / "reports" / "quality_report.json",
     "signal_audit_report_file": ROOT_DIR / "output" / "reports" / "signal_audit.json",
     "taxonomy_bootstrap_prompt_file": ROOT_DIR / "output" / "reports" / "taxonomy_bootstrap_prompt.md",
     "taxonomy_bootstrap_clusters_file": ROOT_DIR / "output" / "reports" / "taxonomy_bootstrap_clusters.json",
+    "taxonomy_followup_prompt_file": ROOT_DIR / "output" / "reports" / "taxonomy_followup_prompt.md",
+    "taxonomy_followup_candidates_file": ROOT_DIR / "output" / "reports" / "taxonomy_followup_candidates.json",
 }
 
 
@@ -752,6 +770,11 @@ def pipeline_generated_paths(config: "PipelineConfig") -> dict[str, list[Path]]:
         paths.html_output,
         paths.log_file,
         paths.signal_audit_report_file,
+        paths.fetch_hotspots_report_file,
+        paths.taxonomy_bootstrap_prompt_file,
+        paths.taxonomy_bootstrap_clusters_file,
+        paths.taxonomy_followup_prompt_file,
+        paths.taxonomy_followup_candidates_file,
     ]
     directories = [paths.reports_dir]
     return {
@@ -782,11 +805,14 @@ class PipelineConfig:
             broken_links_report_file=_resolve_path(raw.get("output", {}).get("broken_links_report_file"), reports_dir / "broken_links.json", self.base_dir),
             confirmation_report_file=_resolve_path(raw.get("output", {}).get("confirmation_report_file"), reports_dir / "needs_confirmation.json", self.base_dir),
             review_report_file=_resolve_path(raw.get("output", {}).get("review_report_file"), reports_dir / "review_queue.json", self.base_dir),
+            fetch_hotspots_report_file=_resolve_path(raw.get("output", {}).get("fetch_hotspots_report_file"), reports_dir / "fetch_hotspots.json", self.base_dir),
             rule_suggestions_report_file=_resolve_path(raw.get("output", {}).get("rule_suggestions_report_file"), reports_dir / "rule_suggestions.json", self.base_dir),
             quality_report_file=_resolve_path(raw.get("output", {}).get("quality_report_file"), reports_dir / "quality_report.json", self.base_dir),
             signal_audit_report_file=_resolve_path(raw.get("output", {}).get("signal_audit_report_file"), reports_dir / "signal_audit.json", self.base_dir),
             taxonomy_bootstrap_prompt_file=_resolve_path(raw.get("output", {}).get("taxonomy_bootstrap_prompt_file"), reports_dir / "taxonomy_bootstrap_prompt.md", self.base_dir),
             taxonomy_bootstrap_clusters_file=_resolve_path(raw.get("output", {}).get("taxonomy_bootstrap_clusters_file"), reports_dir / "taxonomy_bootstrap_clusters.json", self.base_dir),
+            taxonomy_followup_prompt_file=_resolve_path(raw.get("output", {}).get("taxonomy_followup_prompt_file"), reports_dir / "taxonomy_followup_prompt.md", self.base_dir),
+            taxonomy_followup_candidates_file=_resolve_path(raw.get("output", {}).get("taxonomy_followup_candidates_file"), reports_dir / "taxonomy_followup_candidates.json", self.base_dir),
         )
         proxy_options = raw.get("fetch_options", {}).get("proxy", {})
         review_policy = raw.get("fetch_options", {}).get("review_policy", {})
@@ -814,6 +840,7 @@ class PipelineConfig:
             "review_policy": {
                 "trusted_access": trusted_access,
             },
+            "domain_overrides": raw.get("fetch_options", {}).get("domain_overrides", {}),
         }
         self.classification_options = raw.get("classification_options", {})
         self.clustering_options = dict(raw.get("clustering_options", {}))

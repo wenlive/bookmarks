@@ -11,6 +11,7 @@ from common import (
     BOOKMARK_TAXONOMY_ASSIGNMENTS_SCHEMA_VERSION,
     DEFAULT_GENERIC_PLATFORM_DOMAINS,
     TAXONOMY_BOOTSTRAP_CLUSTERS_SCHEMA_VERSION,
+    TAXONOMY_FOLLOWUP_CANDIDATES_SCHEMA_VERSION,
     USER_TAXONOMY_RESPONSE_SCHEMA_VERSION,
     USER_TAXONOMY_SCHEMA_VERSION,
     build_parser,
@@ -132,16 +133,32 @@ def normalize_root_groups(root_groups: list[dict[str, Any]], category_paths: set
     return normalized
 
 
+def _assignment_targets(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    schema_version = payload.get("schema_version")
+    if schema_version == TAXONOMY_BOOTSTRAP_CLUSTERS_SCHEMA_VERSION:
+        items = payload.get("clusters", [])
+    elif schema_version == TAXONOMY_FOLLOWUP_CANDIDATES_SCHEMA_VERSION:
+        items = payload.get("bundles", [])
+    else:
+        raise ValueError(
+            "assignment target payload schema_version 必须是 "
+            f"{TAXONOMY_BOOTSTRAP_CLUSTERS_SCHEMA_VERSION} 或 {TAXONOMY_FOLLOWUP_CANDIDATES_SCHEMA_VERSION}"
+        )
+
+    targets: dict[str, dict[str, Any]] = {}
+    for item in items:
+        cluster_id = str(item.get("cluster_id") or item.get("bundle_id") or "").strip()
+        if cluster_id:
+            targets[cluster_id] = item
+    return targets
+
+
 def build_assignments(
     response: dict[str, Any],
     clusters_payload: dict[str, Any],
     category_paths: set[str],
 ) -> dict[str, dict[str, Any]]:
-    cluster_map = {
-        cluster["cluster_id"]: cluster
-        for cluster in clusters_payload.get("clusters", [])
-        if cluster.get("cluster_id")
-    }
+    cluster_map = _assignment_targets(clusters_payload)
     assignments: dict[str, dict[str, Any]] = {}
     for item in response.get("cluster_assignments", []):
         cluster_id = str(item.get("cluster_id") or "").strip()
@@ -173,12 +190,62 @@ def build_assignments(
     return assignments
 
 
+def _load_existing_json(path: Path | None) -> dict[str, Any]:
+    if not path or not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _load_existing_taxonomy(path: Path | None) -> dict[str, Any]:
+    payload = _load_existing_json(path)
+    if not payload:
+        return {}
+    if payload.get("schema_version") != USER_TAXONOMY_SCHEMA_VERSION:
+        raise ValueError(f"existing taxonomy schema_version 必须是 {USER_TAXONOMY_SCHEMA_VERSION}: {path}")
+    return payload
+
+
+def _load_existing_assignments(path: Path | None) -> dict[str, Any]:
+    payload = _load_existing_json(path)
+    if not payload:
+        return {}
+    if payload.get("schema_version") != BOOKMARK_TAXONOMY_ASSIGNMENTS_SCHEMA_VERSION:
+        raise ValueError(
+            "existing assignments schema_version 必须是 "
+            f"{BOOKMARK_TAXONOMY_ASSIGNMENTS_SCHEMA_VERSION}: {path}"
+        )
+    return payload
+
+
+def merge_categories(
+    existing_categories: dict[str, dict[str, Any]],
+    new_categories: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    merged = dict(existing_categories)
+    merged.update(new_categories)
+    return merged
+
+
+def merge_assignments(
+    existing_assignments: dict[str, dict[str, Any]],
+    new_assignments: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    merged = dict(existing_assignments)
+    for identity, item in new_assignments.items():
+        existing = merged.get(identity)
+        if existing and float(existing.get("confidence", 0.0) or 0.0) > float(item.get("confidence", 0.0) or 0.0):
+            continue
+        merged[identity] = item
+    return merged
+
+
 def main() -> int:
     parser = build_parser("导入外部 LLM taxonomy JSON")
     parser.add_argument("--response", type=Path, required=True)
     parser.add_argument("--clusters", type=Path, default=None)
     parser.add_argument("--taxonomy-output", type=Path, default=None)
     parser.add_argument("--assignments-output", type=Path, default=None)
+    parser.add_argument("--merge-existing", action="store_true", help="与现有 generated taxonomy/assignments 合并")
     args = parser.parse_args()
 
     config = load_config_from_args(args)
@@ -187,15 +254,50 @@ def main() -> int:
     assignments_output = args.assignments_output or config.paths.bookmark_assignment_file
 
     response = load_response_payload(args.response)
-    clusters_payload = require_payload_schema(
-        json.loads(clusters_file.read_text(encoding="utf-8")),
-        TAXONOMY_BOOTSTRAP_CLUSTERS_SCHEMA_VERSION,
-        "taxonomy bootstrap clusters",
-        clusters_file,
+    existing_taxonomy = _load_existing_taxonomy(taxonomy_output) if args.merge_existing else {}
+    existing_assignments_payload = _load_existing_assignments(assignments_output) if args.merge_existing else {}
+    existing_categories = (
+        existing_taxonomy.get("categories", {})
+        if isinstance(existing_taxonomy.get("categories"), dict)
+        else {}
     )
-    category_rules, category_paths = normalize_categories(response.get("categories", []))
-    root_groups = normalize_root_groups(response.get("root_groups", []), category_paths)
-    assignments = build_assignments(response, clusters_payload, category_paths)
+    existing_root_groups = (
+        existing_taxonomy.get("root_groups", [])
+        if isinstance(existing_taxonomy.get("root_groups"), list)
+        else []
+    )
+    existing_assignments = (
+        existing_assignments_payload.get("assignments", {})
+        if isinstance(existing_assignments_payload.get("assignments"), dict)
+        else {}
+    )
+
+    new_category_rules, _ = normalize_categories(response.get("categories", []))
+    category_rules = merge_categories(existing_categories, new_category_rules) if args.merge_existing else new_category_rules
+    category_paths = set(category_rules)
+
+    if response.get("root_groups"):
+        root_groups = normalize_root_groups(response.get("root_groups", []), category_paths)
+    elif args.merge_existing and existing_root_groups:
+        root_groups = existing_root_groups
+    else:
+        root_groups = normalize_root_groups([], category_paths)
+
+    if response.get("cluster_assignments"):
+        clusters_payload = json.loads(clusters_file.read_text(encoding="utf-8"))
+        if clusters_payload.get("schema_version") not in {
+            TAXONOMY_BOOTSTRAP_CLUSTERS_SCHEMA_VERSION,
+            TAXONOMY_FOLLOWUP_CANDIDATES_SCHEMA_VERSION,
+        }:
+            raise ValueError(
+                "assignment target payload schema_version 必须是 "
+                f"{TAXONOMY_BOOTSTRAP_CLUSTERS_SCHEMA_VERSION} 或 {TAXONOMY_FOLLOWUP_CANDIDATES_SCHEMA_VERSION}: {clusters_file}"
+            )
+        assignments = build_assignments(response, clusters_payload, category_paths)
+    else:
+        assignments = {}
+    if args.merge_existing:
+        assignments = merge_assignments(existing_assignments, assignments)
 
     taxonomy_payload = {
         "schema_version": USER_TAXONOMY_SCHEMA_VERSION,

@@ -120,6 +120,16 @@ DISPLAY_TOKEN_OVERRIDES = {
     "llm": "LLM",
     "github": "GitHub",
 }
+TIDY_BUCKET_DISPLAY_NAMES = {
+    "fetch_blocked": "抓取受阻",
+    "rule_gap": "规则缺口",
+    "low_confidence": "低置信度",
+}
+TIDY_BUCKET_DISPLAY_ORDER = {
+    "抓取受阻": 0,
+    "规则缺口": 1,
+    "低置信度": 2,
+}
 
 
 @dataclass
@@ -1932,6 +1942,121 @@ def compact_hierarchy_map(hierarchy: dict[str, dict]) -> dict[str, dict]:
     }
 
 
+def _bookmark_confirmation_bucket(bookmark: dict) -> str:
+    classification = bookmark.get("classification", {}) if isinstance(bookmark.get("classification"), dict) else {}
+    bucket = str(classification.get("confirmation_bucket") or "low_confidence").strip().lower()
+    return bucket if bucket in TIDY_BUCKET_DISPLAY_NAMES else "low_confidence"
+
+
+def _tidy_bucket_name(bucket: str) -> str:
+    return TIDY_BUCKET_DISPLAY_NAMES.get(bucket, TIDY_BUCKET_DISPLAY_NAMES["low_confidence"])
+
+
+def _pick_dominant_tidy_bucket(bookmarks: list[dict]) -> str:
+    counts: Counter[str] = Counter(_bookmark_confirmation_bucket(bookmark) for bookmark in bookmarks)
+    if not counts:
+        return "low_confidence"
+    return sorted(
+        counts.items(),
+        key=lambda item: (-item[1], TIDY_BUCKET_DISPLAY_ORDER.get(_tidy_bucket_name(item[0]), 10**6), item[0]),
+    )[0][0]
+
+
+def _is_high_quality_tidy_label(clusterer: BookmarkClusterer, label: str, bucket_name: str, payload: dict) -> bool:
+    cleaned = clusterer._human_label(label)
+    if not cleaned or int(payload.get("count", 0) or 0) < 2:
+        return False
+    if clusterer._is_generic_label(cleaned, bucket_name):
+        return False
+    if clusterer._is_weak_topic_label(cleaned) or clusterer._is_noisy_topic_label(cleaned):
+        return False
+    if normalize_topic_token(cleaned) in {
+        normalize_topic_token(bucket_name),
+        normalize_topic_token("待整理"),
+        normalize_topic_token(payload.get("category", "")),
+    }:
+        return False
+    if cleaned.lower().endswith(("-csdn", "-zhihu", "-github")):
+        return False
+    return True
+
+
+def restructure_tidy_root_for_display(
+    clusterer: BookmarkClusterer,
+    tidy_payload: dict,
+    *,
+    tidy_root_name: str = "待整理",
+) -> dict:
+    rewritten = copy.deepcopy(tidy_payload)
+    bucket_nodes = {
+        name: {
+            "name": name,
+            "category": f"{tidy_root_name}/{name}",
+            "subcategories": {},
+            "bookmarks": [],
+            "count": 0,
+            "cluster_reason": f"按待整理原因分组显示: {name}",
+            "representative_tokens": [],
+            "source_folder_reused": False,
+            "source_folder_quality_score": 0.0,
+            "merge_from_categories": [],
+            "preserve_children": True,
+            "display_order": TIDY_BUCKET_DISPLAY_ORDER.get(name, 10**6),
+        }
+        for name in TIDY_BUCKET_DISPLAY_ORDER
+    }
+
+    def add_bookmarks_to_bucket(bucket_name: str, bookmarks: list[dict], *, merge_from: list[str] | None = None) -> None:
+        bucket_node = bucket_nodes[bucket_name]
+        bucket_node["bookmarks"].extend(bookmarks)
+        if merge_from:
+            bucket_node["merge_from_categories"].extend(merge_from)
+
+    for bookmark in rewritten.get("bookmarks", []):
+        bucket_name = _tidy_bucket_name(_bookmark_confirmation_bucket(bookmark))
+        add_bookmarks_to_bucket(bucket_name, [bookmark], merge_from=[bookmark.get("classification", {}).get("category", "")])
+
+    for child_name, child_payload in (rewritten.get("subcategories") or {}).items():
+        child_bookmarks = _collect_payload_bookmarks(child_payload)
+        if not child_bookmarks:
+            continue
+        bucket_name = _tidy_bucket_name(_pick_dominant_tidy_bucket(child_bookmarks))
+        merge_from = list(child_payload.get("merge_from_categories") or [])
+        if len(child_bookmarks) == 1 or not _is_high_quality_tidy_label(clusterer, child_name, bucket_name, child_payload):
+            add_bookmarks_to_bucket(bucket_name, child_bookmarks, merge_from=merge_from)
+            continue
+
+        bucket_nodes[bucket_name]["subcategories"][child_name] = copy.deepcopy(child_payload)
+        bucket_nodes[bucket_name]["merge_from_categories"].extend(merge_from)
+
+    final_subcategories = {}
+    total_count = 0
+    for bucket_name in sorted(bucket_nodes, key=lambda item: TIDY_BUCKET_DISPLAY_ORDER.get(item, 10**6)):
+        bucket_node = bucket_nodes[bucket_name]
+        bucket_node["merge_from_categories"] = sorted(set(filter(None, bucket_node.get("merge_from_categories", []))))
+        bucket_node["count"] = len(bucket_node.get("bookmarks", [])) + sum(
+            child.get("count", 0) for child in bucket_node.get("subcategories", {}).values()
+        )
+        if bucket_node["count"] <= 0:
+            continue
+        bucket_bookmarks = list(bucket_node.get("bookmarks", []))
+        for child in bucket_node.get("subcategories", {}).values():
+            bucket_bookmarks.extend(_collect_payload_bookmarks(child))
+        bucket_node["representative_tokens"] = clusterer._representative_tokens(bucket_bookmarks)
+        final_subcategories[bucket_name] = bucket_node
+        total_count += bucket_node["count"]
+
+    rewritten["bookmarks"] = []
+    rewritten["subcategories"] = final_subcategories
+    rewritten["count"] = total_count
+    rewritten["cluster_reason"] = "按待整理原因重组显示层目录"
+    rewritten["representative_tokens"] = clusterer._representative_tokens(
+        [bookmark for bucket in final_subcategories.values() for bookmark in _collect_payload_bookmarks(bucket)]
+    )
+    rewritten["preserve_children"] = True
+    return rewritten
+
+
 def build_auto_root_groups(root_hierarchy: dict[str, dict], display_options: dict) -> list[dict[str, list[str] | str]]:
     discovery_root_name = display_options.get("discovery_root_name", "发现主题")
     tidy_root_name = display_options.get("tidy_root_name", "待整理")
@@ -1968,10 +2093,18 @@ def build_display_hierarchy(
 ) -> dict[str, dict]:
     fallback_group_name = display_options.get("fallback_group_name", "实验与杂项")
     discovery_root_name = display_options.get("discovery_root_name", "发现主题")
+    tidy_root_name = display_options.get("tidy_root_name", "待整理")
     collapse_single_child = bool(display_options.get("collapse_single_child", True))
     max_depth = int(display_options.get("max_depth", 3))
+    display_root_hierarchy = copy.deepcopy(root_hierarchy)
+    if tidy_root_name in display_root_hierarchy:
+        display_root_hierarchy[tidy_root_name] = restructure_tidy_root_for_display(
+            clusterer,
+            display_root_hierarchy[tidy_root_name],
+            tidy_root_name=tidy_root_name,
+        )
     if not root_groups or display_options.get("grouping_mode") == "auto":
-        root_groups = build_auto_root_groups(root_hierarchy, display_options)
+        root_groups = build_auto_root_groups(display_root_hierarchy, display_options)
 
     specs = [
         {
@@ -1983,7 +2116,7 @@ def build_display_hierarchy(
     assigned_roots = {root for spec in specs for root in spec["roots"]}
     remaining_roots = [
         root
-        for root in root_hierarchy
+        for root in display_root_hierarchy
         if root not in assigned_roots and root != discovery_root_name
     ]
     if remaining_roots:
@@ -1992,25 +2125,25 @@ def build_display_hierarchy(
             specs.append({"name": fallback_group_name, "roots": remaining_roots})
         else:
             fallback_spec["roots"] = list(dict.fromkeys(fallback_spec["roots"] + remaining_roots))
-    if discovery_root_name in root_hierarchy and discovery_root_name not in assigned_roots:
+    if discovery_root_name in display_root_hierarchy and discovery_root_name not in assigned_roots:
         specs.append({"name": discovery_root_name, "roots": [discovery_root_name]})
 
     display_hierarchy: dict[str, dict] = {}
     for order, spec in enumerate(specs):
         group_name = spec["name"]
-        roots = [root for root in spec["roots"] if root in root_hierarchy]
+        roots = [root for root in spec["roots"] if root in display_root_hierarchy]
         if not roots:
             continue
 
         if collapse_single_child and len(roots) == 1:
-            payload = copy.deepcopy(root_hierarchy[roots[0]])
+            payload = copy.deepcopy(display_root_hierarchy[roots[0]])
             payload["name"] = group_name
             payload["category"] = group_name
             payload["display_order"] = order
         else:
             subcategories = {}
             for child_order, root_name in enumerate(roots):
-                child_payload = copy.deepcopy(root_hierarchy[root_name])
+                child_payload = copy.deepcopy(display_root_hierarchy[root_name])
                 child_payload["name"] = root_name
                 child_payload["category"] = root_name
                 child_payload["display_order"] = child_order

@@ -10,7 +10,7 @@ SCRIPTS = ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from test_pipeline_support import build_metadata, write_enriched_fixture  # noqa: E402
-from scripts_compat import common_module, parse_bookmarks_module, classify_module, cluster_module, html_module, copy_module, fetch_module, reset_module, bootstrap_module, apply_taxonomy_module  # noqa: E402
+from scripts_compat import common_module, parse_bookmarks_module, classify_module, cluster_module, html_module, copy_module, fetch_module, reset_module, bootstrap_module, apply_taxonomy_module, followup_module  # noqa: E402
 
 
 def _bookmark(index, *, name, url, domain, category, folder, resource_type="文档", title="", description="", keywords="", content_preview=""):
@@ -1101,6 +1101,100 @@ def test_taxonomy_bootstrap_generates_prompt_and_cluster_payload(tmp_path):
     assert "不要把 GitHub" in prompt
 
 
+def test_taxonomy_followup_bundles_include_rule_gap_clusters_and_aggregates():
+    docker_docs = _bookmark(
+        1,
+        name="Docker Docs",
+        url="https://docs.docker.com/engine/",
+        domain="docs.docker.com",
+        category="待整理",
+        folder=["Inbox"],
+        description="docker engine manual",
+        keywords="docker,engine",
+    )
+    docker_blog = _bookmark(
+        2,
+        name="Docker Networking",
+        url="https://example.com/docker-networking",
+        domain="example.com",
+        category="待整理",
+        folder=["Inbox"],
+        description="docker networking guide",
+        keywords="docker,networking",
+    )
+    openai_one = _bookmark(
+        3,
+        name="OpenAI API Guide",
+        url="https://example.com/openai-api-guide",
+        domain="example.com",
+        category="待整理",
+        folder=["Inbox"],
+        description="openai api quickstart",
+        keywords="openai,api",
+    )
+    openai_two = _bookmark(
+        4,
+        name="OpenAI Embeddings",
+        url="https://example.com/openai-embeddings",
+        domain="example.com",
+        category="待整理",
+        folder=["Inbox"],
+        description="openai embeddings usage",
+        keywords="openai,embeddings",
+    )
+    blocked = _bookmark(
+        5,
+        name="Blocked Topic",
+        url="https://blocked.example.com/topic",
+        domain="blocked.example.com",
+        category="待整理",
+        folder=["Inbox"],
+        description="blocked content",
+        keywords="blocked",
+    )
+    for bookmark, topic in (
+        (docker_docs, "Docker"),
+        (docker_blog, "Docker"),
+        (openai_one, "OpenAI"),
+        (openai_two, "OpenAI"),
+        (blocked, "Blocked"),
+    ):
+        bookmark["classification"].update(
+            {
+                "display_category": "待整理",
+                "resource_type": "文档",
+                "rule_confidence": 0.0,
+                "cluster_hints": [topic],
+                "open_topic_candidates": [{"topic": topic, "confidence": 0.8}],
+                "rule_candidates": [],
+                "confirmation_bucket": "rule_gap",
+                "review_required": bookmark["id"] == "bookmark_5",
+            }
+        )
+
+    cluster_profiles = [
+        {
+            "cluster_id": "cluster_docker",
+            "cluster_label": "Docker",
+            "destination_root": "待整理",
+            "bookmarks": [docker_docs, docker_blog],
+        }
+    ]
+
+    bundles = followup_module.build_followup_bundles(
+        [docker_docs, docker_blog, openai_one, openai_two, blocked],
+        cluster_profiles,
+        generic_platform_domains=set(common_module.DEFAULT_GENERIC_PLATFORM_DOMAINS),
+        tidy_root_name="待整理",
+    )
+
+    assert {bundle["bundle_type"] for bundle in bundles} == {"aggregate", "cluster"}
+    assert any(bundle["cluster_label"] == "Docker" and bundle["support_count"] == 2 for bundle in bundles)
+    assert any(bundle["bundle_type"] == "aggregate" and bundle["cluster_label"] == "OpenAI" for bundle in bundles)
+    bundled_identities = {identity for bundle in bundles for identity in bundle["bookmark_identities"]}
+    assert "https://blocked.example.com/topic" not in bundled_identities
+
+
 def test_apply_taxonomy_response_generates_files_and_classifier_uses_assignment(tmp_path):
     clusters_file = tmp_path / "taxonomy_bootstrap_clusters.json"
     response_file = tmp_path / "taxonomy_response.md"
@@ -1192,6 +1286,141 @@ def test_apply_taxonomy_response_generates_files_and_classifier_uses_assignment(
     assert classification["top_decision_drivers"][0]["driver"] == "llm_cluster_assignment"
 
 
+def test_apply_taxonomy_response_merge_existing_preserves_root_groups_and_upgrades_assignments(tmp_path):
+    candidates_file = tmp_path / "taxonomy_followup_candidates.json"
+    response_file = tmp_path / "taxonomy_followup_response.md"
+    taxonomy_file = tmp_path / "generated" / "user_taxonomy.json"
+    assignments_file = tmp_path / "generated" / "bookmark_taxonomy_assignments.json"
+    config_file = tmp_path / "skill_config.json"
+
+    candidates_file.write_text(
+        json.dumps(
+            {
+                "schema_version": common_module.TAXONOMY_FOLLOWUP_CANDIDATES_SCHEMA_VERSION,
+                "bundle_count": 1,
+                "bundles": [
+                    {
+                        "bundle_id": "tf_docker",
+                        "cluster_id": "tf_docker",
+                        "bookmark_identities": [
+                            "https://example.com/docker-guide",
+                            "https://example.com/postgres-old",
+                        ],
+                        "representative_bookmarks": [],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    taxonomy_file.parent.mkdir(parents=True, exist_ok=True)
+    taxonomy_file.write_text(
+        json.dumps(
+            {
+                "schema_version": common_module.USER_TAXONOMY_SCHEMA_VERSION,
+                "root_groups": [{"name": "主要主题", "roots": ["数据库"]}],
+                "categories": {
+                    "数据库/PostgreSQL": {
+                        "domains": ["postgresql.org"],
+                        "keywords": ["postgresql"],
+                        "title_patterns": ["[Pp]ostgreSQL"],
+                        "folder_keywords": [],
+                        "description": "PostgreSQL 资料",
+                        "source": "seed",
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    assignments_file.write_text(
+        json.dumps(
+            {
+                "schema_version": common_module.BOOKMARK_TAXONOMY_ASSIGNMENTS_SCHEMA_VERSION,
+                "assignments": {
+                    "https://example.com/postgres-old": {
+                        "category": "数据库/PostgreSQL",
+                        "confidence": 0.4,
+                        "confidence_label": "low",
+                        "source_cluster_id": "seed_low",
+                        "source": "seed",
+                    },
+                    "https://example.com/existing-keep": {
+                        "category": "数据库/PostgreSQL",
+                        "confidence": 0.95,
+                        "confidence_label": "high",
+                        "source_cluster_id": "seed_high",
+                        "source": "seed",
+                    },
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    response_file.write_text(
+        """```json
+{
+  "schema_version": "user_taxonomy_response/v1",
+  "categories": [
+    {
+      "path": "容器/Docker",
+      "description": "Docker 资料",
+      "aliases": ["docker"],
+      "title_patterns": ["Docker"],
+      "topic_domains": ["docker.com"]
+    }
+  ],
+  "cluster_assignments": [{"cluster_id": "tf_docker", "category": "容器/Docker", "confidence": "high"}],
+  "uncategorized_cluster_ids": [],
+  "notes": []
+}
+```""",
+        encoding="utf-8",
+    )
+    config_file.write_text(
+        json.dumps(
+            {
+                "input": {
+                    "user_taxonomy_file": str(taxonomy_file),
+                    "bookmark_assignment_file": str(assignments_file),
+                },
+                "output": {"reports_directory": str(tmp_path / "reports")},
+                "logging": {"file": str(tmp_path / "app.log"), "console": False},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        [
+            "python3",
+            "scripts/apply_taxonomy_response.py",
+            "--config",
+            str(config_file),
+            "--response",
+            str(response_file),
+            "--clusters",
+            str(candidates_file),
+            "--merge-existing",
+        ],
+        cwd=ROOT,
+        check=True,
+    )
+
+    taxonomy = json.loads(taxonomy_file.read_text(encoding="utf-8"))
+    assignments = json.loads(assignments_file.read_text(encoding="utf-8"))
+    assert taxonomy["root_groups"] == [{"name": "主要主题", "roots": ["数据库"]}]
+    assert set(taxonomy["categories"]) == {"数据库/PostgreSQL", "容器/Docker"}
+    assert assignments["assignments"]["https://example.com/docker-guide"]["category"] == "容器/Docker"
+    assert assignments["assignments"]["https://example.com/postgres-old"]["category"] == "容器/Docker"
+    assert assignments["assignments"]["https://example.com/postgres-old"]["confidence"] == 0.95
+    assert assignments["assignments"]["https://example.com/existing-keep"]["category"] == "数据库/PostgreSQL"
+
+
 def test_apply_taxonomy_response_rejects_generic_platform_topic_domain(tmp_path):
     clusters_payload = {"schema_version": common_module.TAXONOMY_BOOTSTRAP_CLUSTERS_SCHEMA_VERSION, "clusters": []}
     clusters_file = tmp_path / "clusters.json"
@@ -1262,6 +1491,61 @@ def test_broken_links_report_export(tmp_path):
     exported = json.loads(report.read_text(encoding="utf-8"))
     assert count == 1
     assert exported["broken_links"][0]["status_code"] == 404
+
+
+def test_fetch_hotspots_report_export_summarizes_domains_and_pass_deltas(tmp_path):
+    primary = [
+        {
+            "id": "bookmark_proxy_timeout",
+            "name": "Zhihu timeout",
+            "url": "https://zhuanlan.zhihu.com/p/1",
+            "domain": "zhuanlan.zhihu.com",
+            "metadata": {"fetch_status": "timeout", "error": "Request timeout", "fetch_context": {"route": "proxy"}},
+        },
+        {
+            "id": "bookmark_csdn_proxy",
+            "name": "CSDN proxy error",
+            "url": "https://blog.csdn.net/post-1",
+            "domain": "blog.csdn.net",
+            "metadata": {"fetch_status": "error", "error": "Connection reset", "fetch_context": {"route": "proxy"}},
+        },
+    ]
+    final = [
+        {
+            "id": "bookmark_zhihu_direct_ok",
+            "name": "Zhihu success",
+            "url": "https://zhuanlan.zhihu.com/p/1",
+            "domain": "zhuanlan.zhihu.com",
+            "metadata": {"fetch_status": "success", "status_code": 200, "fetch_context": {"route": "direct"}},
+        },
+        {
+            "id": "bookmark_csdn_direct_error",
+            "name": "CSDN direct error",
+            "url": "https://blog.csdn.net/post-1",
+            "domain": "blog.csdn.net",
+            "metadata": {"fetch_status": "error", "error": "Connection reset", "fetch_context": {"route": "direct"}},
+        },
+        {
+            "id": "bookmark_csdn_http",
+            "name": "CSDN 403",
+            "url": "https://blog.csdn.net/post-2",
+            "domain": "blog.csdn.net",
+            "metadata": {"fetch_status": "broken", "status_code": 403, "error": "HTTP 403", "fetch_context": {"route": "proxy"}},
+        },
+    ]
+
+    report = tmp_path / "fetch_hotspots.json"
+    count = fetch_module.export_fetch_hotspots_report(primary, final, report)
+    exported = json.loads(report.read_text(encoding="utf-8"))
+    domains = {item["domain"]: item for item in exported["domains"]}
+
+    assert count == 2
+    assert exported["schema_version"] == common_module.FETCH_HOTSPOTS_SCHEMA_VERSION
+    assert domains["zhuanlan.zhihu.com"]["review_count"] == 0
+    assert domains["zhuanlan.zhihu.com"]["pass_deltas"] == {"review_delta": -1, "success_delta": 1}
+    assert domains["blog.csdn.net"]["review_count"] == 2
+    assert {row["reason_code"] for row in domains["blog.csdn.net"]["reason_codes"]} == {"http_error", "other_error"}
+    assert {row["route"] for row in domains["blog.csdn.net"]["routes"]} == {"direct", "proxy"}
 
 
 class FakeResponse:
@@ -1350,6 +1634,42 @@ def test_fetch_with_site_profile_and_homepage_enrichment():
     assert metadata["path_segments"] == ["manual", "api", "ref"]
     assert metadata["site_profile"]["url"]["registrable_domain"] == "example.com"
     assert session.requested_urls == [deep_url, homepage_url]
+
+
+def test_fetch_with_domain_override_can_skip_homepage_and_force_direct_route():
+    deep_url = "https://docs.example.com/manual/api/ref"
+    homepage_url = "https://docs.example.com/"
+    deep_html = """
+    <html lang='en'><head>
+      <title>Ref</title>
+      <meta property='og:title' content='API Reference'>
+      <meta property='og:site_name' content='Example Docs'>
+    </head><body><main><h1>Reference</h1>Short docs page.</main></body></html>
+    """
+    session = FakeSession({
+        deep_url: FakeResponse(200, deep_url, deep_html),
+        homepage_url: FakeResponse(200, homepage_url, "<html><body>unused</body></html>"),
+    })
+
+    metadata = fetch_module.asyncio.run(
+        fetch_module.fetch_with_aiohttp(
+            session,
+            deep_url,
+            timeout=3,
+            max_retries=0,
+            proxy_options={"enabled": True, "trust_env": True, "http_proxy": None, "https_proxy": None, "all_proxy": None},
+            domain_overrides={
+                "example.com": {"fetch_homepage": True},
+                "docs.example.com": {"fetch_homepage": False, "prefer_direct": True},
+            },
+        )
+    )
+
+    assert metadata["fetch_status"] == "success"
+    assert metadata["site_signals"]["homepage_fetch_status"] == "skipped"
+    assert metadata["fetch_context"]["route"] == "direct"
+    assert metadata["fetch_context"]["domain_override"] == "docs.example.com"
+    assert session.requested_urls == [deep_url]
 
 
 def test_fetch_helpers_identify_url_and_site_types():
@@ -2439,6 +2759,70 @@ def test_build_display_hierarchy_can_auto_group_actual_roots_without_profile_con
 
     assert list(display_hierarchy) == ["主要主题", "待整理", "发现主题"]
     assert set(display_hierarchy["主要主题"]["subcategories"]) == {"园艺", "食谱"}
+
+
+def test_build_display_hierarchy_restructures_tidy_root_by_confirmation_bucket():
+    clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2)
+    blocked = _bookmark(1, name="Blocked Q", url="https://zhuanlan.zhihu.com/p/1", domain="zhuanlan.zhihu.com", category="待整理", folder=["Inbox"])
+    docker_one = _bookmark(2, name="Docker Docs", url="https://docs.docker.com/engine/", domain="docs.docker.com", category="待整理", folder=["Inbox"])
+    docker_two = _bookmark(3, name="Docker Compose", url="https://example.com/docker-compose", domain="example.com", category="待整理", folder=["Inbox"])
+    low_conf = _bookmark(4, name="Ambiguous Note", url="https://example.com/ambiguous", domain="example.com", category="待整理", folder=["Inbox"])
+    for bookmark, bucket in (
+        (blocked, "fetch_blocked"),
+        (docker_one, "rule_gap"),
+        (docker_two, "rule_gap"),
+        (low_conf, "low_confidence"),
+    ):
+        bookmark["classification"].update(
+            {
+                "resource_type": "文档",
+                "confirmation_bucket": bucket,
+                "review_required": bucket == "fetch_blocked",
+            }
+        )
+
+    root_hierarchy = {
+        "待整理": {
+            "name": "待整理",
+            "category": "待整理",
+            "bookmarks": [low_conf],
+            "subcategories": {
+                "Question": {
+                    "name": "Question",
+                    "category": "待整理",
+                    "bookmarks": [blocked],
+                    "subcategories": {},
+                    "count": 1,
+                    "merge_from_categories": ["待整理"],
+                },
+                "Docker": {
+                    "name": "Docker",
+                    "category": "待整理",
+                    "bookmarks": [docker_one, docker_two],
+                    "subcategories": {},
+                    "count": 2,
+                    "merge_from_categories": ["待整理"],
+                },
+            },
+            "count": 4,
+            "preserve_children": True,
+        }
+    }
+
+    display_hierarchy = cluster_module.build_display_hierarchy(
+        clusterer,
+        root_hierarchy,
+        [],
+        common_module.DEFAULT_DISPLAY_OPTIONS,
+    )
+
+    tidy_root = display_hierarchy["待整理"]
+    assert set(tidy_root["subcategories"]) == {"抓取受阻", "规则缺口", "低置信度"}
+    assert "Docker" in tidy_root["subcategories"]["规则缺口"]["subcategories"]
+    assert not tidy_root["subcategories"]["抓取受阻"]["subcategories"]
+    assert [bookmark["name"] for bookmark in tidy_root["subcategories"]["抓取受阻"]["bookmarks"]] == ["Blocked Q"]
+    assert [bookmark["name"] for bookmark in tidy_root["subcategories"]["低置信度"]["bookmarks"]] == ["Ambiguous Note"]
+    assert "Question" in root_hierarchy["待整理"]["subcategories"]
 
 
 def test_build_display_hierarchy_does_not_duplicate_discovery_root_when_already_grouped():

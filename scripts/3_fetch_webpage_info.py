@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import re
 import warnings
@@ -16,6 +17,7 @@ from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 
 from common import (
     FETCH_OUTPUT_SCHEMA_VERSION,
+    FETCH_HOTSPOTS_SCHEMA_VERSION,
     build_parser,
     configure_logging,
     ensure_parent,
@@ -53,6 +55,14 @@ REVIEW_LABELS = {
 
 def clean_text(value: str) -> str:
     return re.sub(r"\s+", " ", value or "").strip()
+
+
+def counter_rows(counter: Counter[str], *, key_name: str, limit: int = 10) -> list[dict[str, int | str]]:
+    return [
+        {key_name: key, "count": count}
+        for key, count in counter.most_common(limit)
+        if key
+    ]
 
 
 def dedupe_preserve_order(values: list[str]) -> list[str]:
@@ -267,6 +277,42 @@ def build_fetch_context(proxy_options: dict | None, *, attempts: int, resolved_p
     }
 
 
+def match_domain_override(url: str, domain_overrides: dict | None) -> tuple[str | None, dict]:
+    if not isinstance(domain_overrides, dict):
+        return None, {}
+    host = urlparse(url).netloc.split("@")[-1].split(":")[0].lower().strip(".")
+    best_match: str | None = None
+    best_rule: dict = {}
+    best_length = -1
+    for suffix, raw_rule in domain_overrides.items():
+        normalized_suffix = str(suffix or "").strip(".").lower()
+        if not normalized_suffix or not isinstance(raw_rule, dict):
+            continue
+        if domain_matches_suffix(host, normalized_suffix) and len(normalized_suffix) > best_length:
+            best_match = normalized_suffix
+            best_rule = dict(raw_rule)
+            best_length = len(normalized_suffix)
+    return best_match, best_rule
+
+
+def effective_proxy_options(proxy_options: dict | None, override_rule: dict | None) -> dict:
+    effective = dict(proxy_options or {})
+    if not override_rule:
+        return effective
+    if override_rule.get("prefer_direct") or override_rule.get("prefer_direct_retry"):
+        effective["enabled"] = False
+        effective["trust_env"] = False
+        effective["http_proxy"] = None
+        effective["https_proxy"] = None
+        effective["all_proxy"] = None
+    elif override_rule.get("prefer_proxy") and (
+        any(effective.get(key) for key in ("http_proxy", "https_proxy", "all_proxy"))
+        or effective.get("trust_env")
+    ):
+        effective["enabled"] = True
+    return effective
+
+
 def resolve_proxy_for_url(url: str, proxy_options: dict) -> str | None:
     if not proxy_options.get("enabled"):
         return None
@@ -350,7 +396,11 @@ def extract_site_name(page_signals: dict, homepage_signals: dict, registrable_do
     return registrable_domain
 
 
-def should_fetch_homepage(url_signals: dict, page_signals: dict) -> bool:
+def should_fetch_homepage(url_signals: dict, page_signals: dict, fetch_homepage_override: bool | None = None) -> bool:
+    if fetch_homepage_override is True:
+        return True
+    if fetch_homepage_override is False:
+        return False
     path_depth = len(url_signals.get("path_segments", []))
     text_length = len(page_signals.get("main_text_preview") or page_signals.get("content_preview") or "")
     title = (page_signals.get("title") or "").strip().lower()
@@ -437,7 +487,15 @@ def extract_page_signals(soup: BeautifulSoup, resolved_url: str) -> dict:
     return page_signals
 
 
-async def fetch_url(session: aiohttp.ClientSession, url: str, timeout: int, max_retries: int, proxy_options: dict) -> Dict:
+async def fetch_url(
+    session: aiohttp.ClientSession,
+    url: str,
+    timeout: int,
+    max_retries: int,
+    proxy_options: dict,
+    *,
+    domain_override_name: str | None = None,
+) -> Dict:
     proxy = resolve_proxy_for_url(url, proxy_options)
     for attempt in range(max_retries + 1):
         try:
@@ -457,25 +515,37 @@ async def fetch_url(session: aiohttp.ClientSession, url: str, timeout: int, max_
                 }
                 return {
                     "response": SimpleResponse(status=status, url=str(response.url), html=html, headers=response_headers),
-                    "fetch_context": build_fetch_context(proxy_options, attempts=attempt + 1, resolved_proxy=proxy),
+                    "fetch_context": {
+                        **build_fetch_context(proxy_options, attempts=attempt + 1, resolved_proxy=proxy),
+                        "domain_override": domain_override_name or "",
+                    },
                 }
         except asyncio.TimeoutError:
             error = {
                 "fetch_status": "timeout",
                 "error": "Request timeout",
-                "fetch_context": build_fetch_context(proxy_options, attempts=attempt + 1, resolved_proxy=proxy),
+                "fetch_context": {
+                    **build_fetch_context(proxy_options, attempts=attempt + 1, resolved_proxy=proxy),
+                    "domain_override": domain_override_name or "",
+                },
             }
         except aiohttp.ClientError as exc:
             error = {
                 "fetch_status": "error",
                 "error": str(exc),
-                "fetch_context": build_fetch_context(proxy_options, attempts=attempt + 1, resolved_proxy=proxy),
+                "fetch_context": {
+                    **build_fetch_context(proxy_options, attempts=attempt + 1, resolved_proxy=proxy),
+                    "domain_override": domain_override_name or "",
+                },
             }
         except Exception as exc:  # noqa: BLE001
             error = {
                 "fetch_status": "error",
                 "error": str(exc),
-                "fetch_context": build_fetch_context(proxy_options, attempts=attempt + 1, resolved_proxy=proxy),
+                "fetch_context": {
+                    **build_fetch_context(proxy_options, attempts=attempt + 1, resolved_proxy=proxy),
+                    "domain_override": domain_override_name or "",
+                },
             }
 
         if attempt == max_retries:
@@ -483,14 +553,42 @@ async def fetch_url(session: aiohttp.ClientSession, url: str, timeout: int, max_
     return {
         "fetch_status": "error",
         "error": "Unknown error",
-        "fetch_context": build_fetch_context(proxy_options, attempts=max_retries + 1, resolved_proxy=proxy),
+        "fetch_context": {
+            **build_fetch_context(proxy_options, attempts=max_retries + 1, resolved_proxy=proxy),
+            "domain_override": domain_override_name or "",
+        },
     }
 
 
-async def fetch_with_aiohttp(session: aiohttp.ClientSession, url: str, timeout: int, max_retries: int, proxy_options: dict) -> Dict:
+async def fetch_with_aiohttp(
+    session: aiohttp.ClientSession,
+    url: str,
+    timeout: int,
+    max_retries: int,
+    proxy_options: dict,
+    domain_overrides: dict | None = None,
+) -> Dict:
     url_signals = extract_url_signals(url)
-    page_fetch = await fetch_url(session, url, timeout, max_retries, proxy_options)
-    fetch_context = page_fetch.get("fetch_context") or build_fetch_context(proxy_options, attempts=max_retries + 1)
+    domain_override_name, override_rule = match_domain_override(url, domain_overrides)
+    timeout_override = override_rule.get("timeout")
+    retries_override = override_rule.get("max_retries")
+    effective_timeout = int(timeout if timeout_override is None else timeout_override)
+    effective_retries = int(max_retries if retries_override is None else retries_override)
+    effective_proxy = effective_proxy_options(proxy_options, override_rule)
+    fetch_homepage_override = override_rule.get("fetch_homepage")
+
+    page_fetch = await fetch_url(
+        session,
+        url,
+        effective_timeout,
+        effective_retries,
+        effective_proxy,
+        domain_override_name=domain_override_name,
+    )
+    fetch_context = page_fetch.get("fetch_context") or {
+        **build_fetch_context(effective_proxy, attempts=effective_retries + 1),
+        "domain_override": domain_override_name or "",
+    }
     if "response" not in page_fetch:
         return normalize_metadata({**url_signals, **page_fetch, "fetch_context": fetch_context, "metadata_schema_version": "site_profile/v1"})
 
@@ -520,8 +618,15 @@ async def fetch_with_aiohttp(session: aiohttp.ClientSession, url: str, timeout: 
     }
 
     homepage_page_signals: dict = {}
-    if homepage_url != page_response.url and should_fetch_homepage(url_signals, page_signals):
-        homepage_fetch = await fetch_url(session, homepage_url, timeout, max_retries, proxy_options)
+    if homepage_url != page_response.url and should_fetch_homepage(url_signals, page_signals, fetch_homepage_override):
+        homepage_fetch = await fetch_url(
+            session,
+            homepage_url,
+            effective_timeout,
+            effective_retries,
+            effective_proxy,
+            domain_override_name=domain_override_name,
+        )
         if "response" in homepage_fetch:
             homepage_response: SimpleResponse = homepage_fetch["response"]
             if homepage_response.status < 400:
@@ -580,12 +685,13 @@ async def process_batch(
     timeout: int,
     max_retries: int,
     proxy_options: dict,
+    domain_overrides: dict | None = None,
     review_policy: dict | None = None,
 ) -> list:
     tasks = []
     for bookmark in bookmarks:
         if bookmark["url"].startswith(("http://", "https://")):
-            tasks.append(fetch_with_aiohttp(session, bookmark["url"], timeout, max_retries, proxy_options))
+            tasks.append(fetch_with_aiohttp(session, bookmark["url"], timeout, max_retries, proxy_options, domain_overrides))
         else:
             tasks.append(asyncio.sleep(0, result=normalize_metadata({"fetch_status": "skipped", "error": "Invalid URL", "metadata_schema_version": "site_profile/v1"})))
 
@@ -644,6 +750,89 @@ def export_review_report(bookmarks: list, report_file: Path, review_policy: dict
     return len(items)
 
 
+def _domain_fetch_hotspot_rows(bookmarks: list[dict], review_policy: dict | None = None) -> dict[str, dict]:
+    rows: dict[str, dict] = {}
+    for bookmark in bookmarks:
+        domain = str(bookmark.get("domain") or "未知域名").strip() or "未知域名"
+        row = rows.setdefault(
+            domain,
+            {
+                "domain": domain,
+                "total_count": 0,
+                "review_count": 0,
+                "success_count": 0,
+                "reason_codes": Counter(),
+                "routes": Counter(),
+                "representative_urls": [],
+            },
+        )
+        row["total_count"] += 1
+        metadata = apply_review_policy(bookmark.get("metadata", {}), bookmark.get("domain", ""), review_policy)
+        link_health = metadata.get("link_health", {})
+        route = (metadata.get("fetch_context", {}) or {}).get("route") or "unknown"
+        row["routes"][route] += 1
+        if metadata.get("fetch_status") == "success":
+            row["success_count"] += 1
+        if link_health.get("review_required"):
+            row["review_count"] += 1
+            reason_code = str(link_health.get("reason_code") or "unknown")
+            row["reason_codes"][reason_code] += 1
+            if len(row["representative_urls"]) < 5:
+                row["representative_urls"].append(
+                    {
+                        "name": bookmark.get("name"),
+                        "url": bookmark.get("url"),
+                        "reason_code": reason_code,
+                    }
+                )
+    return rows
+
+
+def export_fetch_hotspots_report(
+    primary_bookmarks: list[dict],
+    final_bookmarks: list[dict],
+    report_file: Path,
+    review_policy: dict | None = None,
+) -> int:
+    primary_rows = _domain_fetch_hotspot_rows(primary_bookmarks, review_policy)
+    final_rows = _domain_fetch_hotspot_rows(final_bookmarks, review_policy)
+    domains = sorted(set(primary_rows) | set(final_rows))
+    items = []
+    for domain in domains:
+        final_row = final_rows.get(domain, {})
+        primary_row = primary_rows.get(domain, {})
+        review_count = int(final_row.get("review_count", 0) or 0)
+        success_count = int(final_row.get("success_count", 0) or 0)
+        pass_deltas = {
+            "review_delta": review_count - int(primary_row.get("review_count", 0) or 0),
+            "success_delta": success_count - int(primary_row.get("success_count", 0) or 0),
+        }
+        if review_count <= 0 and pass_deltas["review_delta"] == 0 and pass_deltas["success_delta"] == 0:
+            continue
+        items.append(
+            {
+                "domain": domain,
+                "review_count": review_count,
+                "total_count": int(final_row.get("total_count", 0) or 0),
+                "success_count": success_count,
+                "reason_codes": counter_rows(final_row.get("reason_codes", Counter()), key_name="reason_code"),
+                "routes": counter_rows(final_row.get("routes", Counter()), key_name="route", limit=4),
+                "pass_deltas": pass_deltas,
+                "representative_urls": final_row.get("representative_urls", []),
+            }
+        )
+
+    items.sort(key=lambda item: (-item["review_count"], -item["total_count"], item["domain"]))
+    payload = {
+        "schema_version": FETCH_HOTSPOTS_SCHEMA_VERSION,
+        "domain_count": len(items),
+        "domains": items,
+    }
+    ensure_parent(report_file)
+    report_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return len(items)
+
+
 async def fetch_webpage_info_async(input_file: Path, output_file: Path, options: dict, logger) -> dict:
     data = json.loads(input_file.read_text(encoding="utf-8"))
     bookmarks = data["bookmarks"]
@@ -688,14 +877,26 @@ async def fetch_webpage_info_async(input_file: Path, output_file: Path, options:
             batch_entries = pending[index:index + options["batch_size"]]
             batch = [bookmark for _, bookmark in batch_entries]
             logger.info("抓取进度: %s/%s", reused_count + index, total)
-            batch_results = await process_batch(
-                batch,
-                session,
-                options["timeout"],
-                options["max_retries"],
-                options["proxy"],
-                review_policy,
-            )
+            process_batch_signature = inspect.signature(process_batch)
+            if "domain_overrides" in process_batch_signature.parameters:
+                batch_results = await process_batch(
+                    batch,
+                    session,
+                    options["timeout"],
+                    options["max_retries"],
+                    options["proxy"],
+                    domain_overrides=options.get("domain_overrides"),
+                    review_policy=review_policy,
+                )
+            else:
+                batch_results = await process_batch(
+                    batch,
+                    session,
+                    options["timeout"],
+                    options["max_retries"],
+                    options["proxy"],
+                    review_policy,
+                )
             for (bookmark_index, _), enriched in zip(batch_entries, batch_results):
                 ordered_results[bookmark_index] = enriched
             await asyncio.sleep(options["delay"])
@@ -784,6 +985,7 @@ def build_pass_summary(label: str, result: dict) -> dict:
 def run_fetch_passes(input_file: Path, output_file: Path, options: dict, logger) -> dict:
     primary_result = asyncio.run(fetch_webpage_info_async(input_file, output_file, options, logger))
     if not options.get("direct_retry_after_proxy") or not fetch_route_configured(options.get("proxy", {})):
+        primary_result["_primary_bookmarks"] = list(primary_result.get("bookmarks", []))
         return primary_result
 
     direct_retry_options = dict(options)
@@ -814,6 +1016,7 @@ def run_fetch_passes(input_file: Path, output_file: Path, options: dict, logger)
     }
     ensure_parent(output_file)
     output_file.write_text(json.dumps(final_result, ensure_ascii=False, indent=2), encoding="utf-8")
+    final_result["_primary_bookmarks"] = list(primary_result.get("bookmarks", []))
     return final_result
 
 
@@ -823,6 +1026,7 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=None, help="输出增强结果 JSON")
     parser.add_argument("--broken-links-report", type=Path, default=None, help="失效链接报告输出路径")
     parser.add_argument("--review-report", type=Path, default=None, help="待审阅异常报告输出路径")
+    parser.add_argument("--fetch-hotspots-report", type=Path, default=None, help="抓取热点域名报告输出路径")
     parser.add_argument("--concurrency", type=int, default=None)
     parser.add_argument("--timeout", type=int, default=None)
     parser.add_argument("--delay", type=float, default=None)
@@ -843,6 +1047,7 @@ def main() -> int:
     output_file = args.output or config.paths.enriched_file
     broken_links_report_file = args.broken_links_report or config.paths.broken_links_report_file
     review_report_file = args.review_report or config.paths.review_report_file
+    fetch_hotspots_report_file = args.fetch_hotspots_report or config.paths.fetch_hotspots_report_file
 
     if not input_file.exists():
         logger.error("输入文件不存在: %s", input_file)
@@ -885,6 +1090,12 @@ def main() -> int:
     result = run_fetch_passes(input_file, output_file, options, logger)
     broken_links_count = export_broken_links_report(result["bookmarks"], broken_links_report_file, options.get("review_policy"))
     review_count = export_review_report(result["bookmarks"], review_report_file, options.get("review_policy"))
+    fetch_hotspots_count = export_fetch_hotspots_report(
+        result.get("_primary_bookmarks", result.get("bookmarks", [])),
+        result["bookmarks"],
+        fetch_hotspots_report_file,
+        options.get("review_policy"),
+    )
     print(f"✓ 网页信息获取完成: {output_file}")
     print(f"  成功: {result['stats']['success_count']}/{result['stats']['total_bookmarks']}")
     print(f"  复用缓存: {result['stats']['reused_count']}")
@@ -895,6 +1106,8 @@ def main() -> int:
     print(f"  失效链接报告: {broken_links_report_file}")
     print(f"  待审阅异常: {review_count}")
     print(f"  待审阅报告: {review_report_file}")
+    print(f"  抓取热点域名: {fetch_hotspots_count}")
+    print(f"  抓取热点报告: {fetch_hotspots_report_file}")
     print(f"  失败: {result['stats']['fail_count']}")
     if result["stats"].get("multi_pass_mode") == "proxy_then_direct_retry":
         deltas = result["stats"].get("pass_deltas", {})
