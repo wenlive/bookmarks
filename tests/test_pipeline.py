@@ -1101,7 +1101,7 @@ def test_taxonomy_bootstrap_generates_prompt_and_cluster_payload(tmp_path):
     assert "不要把 GitHub" in prompt
 
 
-def test_taxonomy_followup_bundles_include_rule_gap_clusters_and_aggregates():
+def test_taxonomy_followup_bundles_include_tidy_semantic_bundles():
     docker_docs = _bookmark(
         1,
         name="Docker Docs",
@@ -1188,9 +1188,10 @@ def test_taxonomy_followup_bundles_include_rule_gap_clusters_and_aggregates():
         tidy_root_name="待整理",
     )
 
-    assert {bundle["bundle_type"] for bundle in bundles} == {"aggregate", "cluster"}
+    assert {bundle["bundle_type"] for bundle in bundles} == {"cluster", "tidy_semantic"}
     assert any(bundle["cluster_label"] == "Docker" and bundle["support_count"] == 2 for bundle in bundles)
-    assert any(bundle["bundle_type"] == "aggregate" and bundle["cluster_label"] == "OpenAI" for bundle in bundles)
+    assert any(bundle["bundle_type"] == "tidy_semantic" and bundle["cluster_label"] == "OpenAI" for bundle in bundles)
+    assert any(bundle["bundle_type"] == "tidy_semantic" and bundle["cluster_id"].startswith("ts_") for bundle in bundles)
     bundled_identities = {identity for bundle in bundles for identity in bundle["bookmark_identities"]}
     assert "https://blocked.example.com/topic" not in bundled_identities
 
@@ -1898,6 +1899,40 @@ def test_classifier_distinguishes_resource_types_within_same_topic():
     assert "社区" in blog_classification["quality_signals"]
 
 
+def test_classifier_repository_resource_type_requires_repository_path():
+    classifier = classify_module.BookmarkClassifier()
+    repo_page = {
+        "id": "bookmark_repo_page",
+        "name": "GitHub - example/postgres-tool",
+        "url": "https://github.com/example/postgres-tool",
+        "domain": "github.com",
+        "original_folder_path": ["代码"],
+        "metadata": {
+            "title": "GitHub - example/postgres-tool: PostgreSQL backup utility",
+            "description": "PostgreSQL backup utility repository",
+            "keywords": "postgresql,backup,repository",
+        },
+    }
+    marketing_page = {
+        "id": "bookmark_marketing_page",
+        "name": "GitHub Actions",
+        "url": "https://github.com/features/actions",
+        "domain": "github.com",
+        "original_folder_path": ["代码"],
+        "metadata": {
+            "title": "GitHub Actions",
+            "description": "Automate your workflow from idea to production",
+            "keywords": "automation,ci,cd",
+        },
+    }
+
+    repo_classification = classifier.classify_bookmark(repo_page)
+    marketing_classification = classifier.classify_bookmark(marketing_page)
+
+    assert repo_classification["resource_type"] == "仓库"
+    assert marketing_classification["resource_type"] != "仓库"
+
+
 def test_clusterer_prefers_classification_resource_type_when_metadata_lacks_it():
     clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2)
     bookmark = {
@@ -2080,6 +2115,34 @@ def test_classifier_suppresses_source_like_generic_doc_tokens():
     assert "腾讯文档" not in classification["cluster_hints"]
 
 
+def test_classifier_generic_platform_title_suffix_does_not_become_topic():
+    classifier = classify_module.BookmarkClassifier()
+    bookmark = {
+        "id": "bookmark_jianshu_suffix",
+        "name": "Docker 网络排障 - 简书",
+        "url": "https://www.jianshu.com/p/docker-networking",
+        "domain": "www.jianshu.com",
+        "original_folder_path": ["Inbox"],
+        "metadata": {
+            "title": "Docker 网络排障 - 简书",
+            "description": "排查 Docker 网络故障的实战笔记",
+            "keywords": "docker,networking,troubleshooting",
+            "site_profile": {
+                "site": {"site_name": "简书", "brand_terms": ["创作你的创作"]},
+                "page": {"og:title": "Docker 网络排障 - 简书"},
+            },
+        },
+    }
+
+    classification = classifier.classify_bookmark(bookmark)
+
+    open_topics = {candidate["topic"].lower() for candidate in classification["open_topic_candidates"]}
+    assert "简书" not in classification["cluster_hints"]
+    assert "创作你的创作" not in classification["cluster_hints"]
+    assert "简书" not in open_topics
+    assert "docker" in open_topics
+
+
 def test_classifier_keeps_user_taxonomy_assignment_for_review_required_links(tmp_path):
     bookmark = {
         "id": "bookmark_untrusted_failure",
@@ -2131,6 +2194,56 @@ def test_classifier_keeps_user_taxonomy_assignment_for_review_required_links(tmp
     assert "待审阅" in classification["quality_signals"]
     assert classification["classification_evidence"]["llm_assignment"]["category"] == "数据库/TiDB"
     assert classification["confidence_components"]["llm_assignment_applied"] is True
+
+
+def test_classifier_keeps_strong_rule_topic_for_review_required_links(tmp_path):
+    taxonomy_file = tmp_path / "user_taxonomy.json"
+    taxonomy_file.write_text(
+        json.dumps(
+            {
+                "schema_version": "user_taxonomy/v1",
+                "categories": {
+                    "数据库/TiDB": {
+                        "domains": ["book.tidb.io"],
+                        "keywords": ["tidb", "tikv", "pingcap"],
+                        "title_patterns": ["TiDB"],
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    classifier = classify_module.BookmarkClassifier(user_taxonomy_file=taxonomy_file)
+    bookmark = {
+        "id": "bookmark_review_keep",
+        "name": "TiDB Architecture Guide",
+        "url": "https://book.tidb.io/session/architecture.html",
+        "domain": "book.tidb.io",
+        "original_folder_path": ["数据库", "TiDB"],
+        "metadata": {
+            "title": "TiDB Architecture Guide",
+            "description": "TiDB distributed database architecture",
+            "keywords": "tidb,tikv,pingcap",
+            "fetch_status": "error",
+            "link_health": {
+                "review_required": True,
+                "trusted_override": False,
+                "reason_label": "DNS/连接失败",
+                "reason_code": "dns_connection",
+            },
+        },
+    }
+
+    classification = classifier.classify_bookmark(bookmark)
+
+    assert classification["category"] == "数据库/TiDB"
+    assert classification["review_required"] is True
+    assert classification["needs_confirmation"] is True
+    assert classification["confirmation_bucket"] == "fetch_blocked"
+    assert classification["rule_confidence"] >= 0.55
+    assert classification["confidence_components"]["review_topic_preserved"] is True
+    assert "待审阅" in classification["quality_signals"]
 
 
 def test_classifier_generated_taxonomy_rules_cover_product_specific_families(tmp_path):
@@ -2359,6 +2472,23 @@ def test_quality_report_tracks_folder_and_generic_domain_metrics():
             }
         ],
         suggestions,
+        display_hierarchy={
+            "待整理": {
+                "name": "待整理",
+                "subcategories": {
+                    "规则缺口": {
+                        "name": "规则缺口",
+                        "subcategories": {
+                            "OpenAI": {"name": "OpenAI", "subcategories": {}, "bookmarks": bookmarks, "count": 1}
+                        },
+                        "bookmarks": [],
+                        "count": 1,
+                    }
+                },
+                "bookmarks": [],
+                "count": 1,
+            }
+        },
         generic_platform_domains={"qq.com", "docs.qq.com"},
     )
 
@@ -2367,6 +2497,11 @@ def test_quality_report_tracks_folder_and_generic_domain_metrics():
     assert report["metrics"]["generic_platform_domain_suggestion_count"] == 0
     assert report["metrics"]["tidy_cluster_count"] == 1
     assert report["metrics"]["flat_normal_root_count"] == 0
+    assert report["metrics"]["display_top_level_root_count"] == 1
+    assert report["metrics"]["tidy_visible_group_count"] == 1
+    assert report["metrics"]["tidy_small_visible_group_count"] == 1
+    assert report["metrics"]["review_required_count"] == 0
+    assert report["metrics"]["review_required_normal_category_count"] == 0
     platform_report = cluster_module.generate_quality_report(
         bookmarks,
         [
@@ -2701,13 +2836,41 @@ def test_build_display_hierarchy_groups_top_level_roots_for_human_browsing():
         common_module.DEFAULT_DISPLAY_OPTIONS,
     )
 
-    assert list(display_hierarchy) == ["主要主题"]
-    assert set(display_hierarchy["主要主题"]["subcategories"]) == {"数据库", "编程语言"}
-    assert "PostgreSQL" in display_hierarchy["主要主题"]["subcategories"]["数据库"]["subcategories"]
-    assert "Python" in display_hierarchy["主要主题"]["subcategories"]["编程语言"]["subcategories"]
+    assert list(display_hierarchy) == ["数据库", "编程语言"]
+    assert "PostgreSQL" in display_hierarchy["数据库"]["subcategories"]
+    assert "Python" in display_hierarchy["编程语言"]["subcategories"]
 
     html = html_module.BookmarkHTMLGenerator().generate_html(display_hierarchy)
     assert html.find("数据库") < html.find("编程语言")
+
+
+def test_build_display_hierarchy_ignores_legacy_single_main_group_wrapper_in_auto_mode():
+    clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2)
+    root_hierarchy = {
+        "数据库": {
+            "name": "数据库",
+            "category": "数据库",
+            "bookmarks": [],
+            "subcategories": {"PostgreSQL": {"name": "PostgreSQL", "category": "数据库/PostgreSQL", "bookmarks": [_bookmark(1, name="PG", url="https://postgresql.org/docs", domain="postgresql.org", category="数据库/PostgreSQL", folder=["数据库"])], "subcategories": {}, "count": 1}},
+            "count": 1,
+        },
+        "编程语言": {
+            "name": "编程语言",
+            "category": "编程语言",
+            "bookmarks": [],
+            "subcategories": {"Python": {"name": "Python", "category": "编程语言/Python", "bookmarks": [_bookmark(2, name="Py", url="https://docs.python.org/3/", domain="docs.python.org", category="编程语言/Python", folder=["编程语言"])], "subcategories": {}, "count": 1}},
+            "count": 1,
+        },
+    }
+
+    display_hierarchy = cluster_module.build_display_hierarchy(
+        clusterer,
+        root_hierarchy,
+        [{"name": "主要主题", "roots": ["数据库", "编程语言"]}],
+        common_module.DEFAULT_DISPLAY_OPTIONS,
+    )
+
+    assert list(display_hierarchy) == ["数据库", "编程语言"]
 
 
 def test_build_display_hierarchy_can_auto_group_actual_roots_without_profile_config():
@@ -2757,8 +2920,9 @@ def test_build_display_hierarchy_can_auto_group_actual_roots_without_profile_con
         common_module.DEFAULT_DISPLAY_OPTIONS,
     )
 
-    assert list(display_hierarchy) == ["主要主题", "待整理", "发现主题"]
-    assert set(display_hierarchy["主要主题"]["subcategories"]) == {"园艺", "食谱"}
+    assert list(display_hierarchy) == ["园艺", "食谱", "待整理"]
+    assert "发现主题" in display_hierarchy["待整理"]["subcategories"]
+    assert "待整理" not in display_hierarchy["待整理"]["subcategories"]
 
 
 def test_build_display_hierarchy_restructures_tidy_root_by_confirmation_bucket():
@@ -2823,6 +2987,78 @@ def test_build_display_hierarchy_restructures_tidy_root_by_confirmation_bucket()
     assert [bookmark["name"] for bookmark in tidy_root["subcategories"]["抓取受阻"]["bookmarks"]] == ["Blocked Q"]
     assert [bookmark["name"] for bookmark in tidy_root["subcategories"]["低置信度"]["bookmarks"]] == ["Ambiguous Note"]
     assert "Question" in root_hierarchy["待整理"]["subcategories"]
+
+
+def test_build_tidy_semantic_bundles_groups_rule_gap_bookmarks_by_semantic_label():
+    clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2)
+    docker_one = _bookmark(
+        1,
+        name="Docker Docs",
+        url="https://docs.docker.com/engine/",
+        domain="docs.docker.com",
+        category="待整理",
+        folder=["Inbox"],
+        description="Docker engine manual",
+        keywords="docker,containers",
+    )
+    docker_two = _bookmark(
+        2,
+        name="Docker Networking",
+        url="https://example.com/docker-networking",
+        domain="example.com",
+        category="待整理",
+        folder=["Inbox"],
+        description="Docker networking deep dive",
+        keywords="docker,networking",
+    )
+    postgres_one = _bookmark(
+        3,
+        name="TiDB Compatibility",
+        url="https://example.com/tidb-compat",
+        domain="example.com",
+        category="待整理",
+        folder=["Inbox"],
+        description="TiDB PostgreSQL compatibility notes",
+        keywords="tidb,postgresql",
+    )
+    postgres_two = _bookmark(
+        4,
+        name="PostgreSQL branch storage",
+        url="https://example.com/postgres-branch-storage",
+        domain="example.com",
+        category="待整理",
+        folder=["Inbox"],
+        description="PostgreSQL storage internals",
+        keywords="postgresql,storage",
+    )
+    for bookmark, topic, candidate in (
+        (docker_one, "Docker", "容器/Docker"),
+        (docker_two, "Docker", "容器/Docker"),
+        (postgres_one, "PostgreSQL", "数据库/PostgreSQL"),
+        (postgres_two, "PostgreSQL", "数据库/PostgreSQL"),
+    ):
+        bookmark["classification"].update(
+            {
+                "resource_type": "文档",
+                "rule_confidence": 0.42,
+                "cluster_hints": [topic],
+                "open_topic_candidates": [{"topic": topic, "score": 4, "sources": ["title", "keywords"]}],
+                "rule_candidates": [{"category": candidate, "root": candidate.split("/")[0], "leaf": candidate.split("/")[-1], "total": 24, "strong_evidence": False}],
+                "rule_roots": [{"root": candidate.split("/")[0], "support": 0.55, "total": 24.0}],
+                "confirmation_bucket": "rule_gap",
+                "review_required": False,
+            }
+        )
+
+    bundles, leftovers = cluster_module.build_tidy_semantic_bundles(
+        clusterer,
+        [docker_one, docker_two, postgres_one, postgres_two],
+        bucket_name="规则缺口",
+    )
+
+    assert leftovers == []
+    assert {bundle["bundle_label"] for bundle in bundles} == {"Docker", "PostgreSQL"}
+    assert all(bundle["support_count"] == 2 for bundle in bundles)
 
 
 def test_build_display_hierarchy_does_not_duplicate_discovery_root_when_already_grouped():

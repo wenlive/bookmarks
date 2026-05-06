@@ -68,7 +68,7 @@ conda run -n base ./organize.sh data/bookmarks.html skill_config.json
 | Want to discard all generated state | `./organize.sh data/bookmarks.html skill_config.json --reset-all` |
 | Need a first-pass taxonomy prompt | `./organize.sh data/bookmarks.html skill_config.json --bootstrap-taxonomy` |
 | Applied external taxonomy response | `python3 scripts/apply_taxonomy_response.py --config skill_config.json --response data/generated/taxonomy_response.json`, then rerun steps 4, 5, 6 |
-| Need a one-shot `rule_gap` follow-up package | `python3 scripts/generate_taxonomy_followup.py --config skill_config.json` |
+| Need a one-shot `待整理` long-tail follow-up package | `python3 scripts/generate_taxonomy_followup.py --config skill_config.json` |
 | Changed generated taxonomy or classification logic | rerun steps 4, 5, 6 |
 | Changed only clustering/display logic | rerun steps 5, 6 |
 | Changed only HTML generation | rerun step 6 |

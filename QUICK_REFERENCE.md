@@ -155,6 +155,7 @@ normal_root_direct_bookmark_share does not grow unexpectedly
 ## Agent Rules
 
 - Treat `README.md` as the design contract.
+- Treat `DESIGN_CONSTRAINTS.md` as the persistent product constraint file.
 - Treat `RUNBOOK.md` as the operating procedure.
 - Treat `AGENTS.md` as the agent implementation guide.
 - Treat `TODO_RUNTIME_FOLLOWUP.md` as the latest real-run continuation baseline.
@@ -162,14 +163,17 @@ normal_root_direct_bookmark_share does not grow unexpectedly
 - Do not classify by broad platform domain.
 - Preserve broken links; mirror them to `待审阅`.
 - Prefer generated user taxonomy constraints over broad built-in defaults.
+- Prefer exported prompt plus imported JSON workflows over built-in live LLM API calls.
+- Preserve both proxy and direct fetch workflows, and surface proxy env setup when real runs need it.
+- Optimize the final visible hierarchy for bookmark-bar browsing, not only clustering purity.
 - Rerun only the downstream steps required by the change.
 
 ## Default Output Shape
 
 ```text
 书签栏
-├── 主要主题
+├── 数据库 / 编程语言 / ...
 ├── 待整理
-├── 发现主题
+├── 发现主题  # or grouped under 待整理 when extremely small
 └── 待审阅  # only when review items exist
 ```

@@ -90,6 +90,7 @@ def render_prompt(clusters: list[dict[str, Any]], max_clusters: int) -> str:
         "# Bookmark Taxonomy Bootstrap",
         "",
         "下面是一次无预设主题规则的书签聚类摘要。请根据这些簇设计适合该用户的分类体系，并给出簇级分类建议。",
+        "本项目不会直接调用任何 LLM API；请使用你自己的外部 LLM 或 code agent 读取 `taxonomy_bootstrap_clusters.json` 后返回严格 JSON。",
         "",
         "要求：",
         "- 不要把 GitHub、知乎、CSDN、Medium、YouTube、Stack Overflow 等通用平台当作主题域名。",
@@ -103,7 +104,7 @@ def render_prompt(clusters: list[dict[str, Any]], max_clusters: int) -> str:
         json.dumps(
             {
                 "schema_version": "user_taxonomy_response/v1",
-                "root_groups": [{"name": "主要主题", "roots": ["示例根主题"]}],
+                "root_groups": [{"name": "示例分组", "roots": ["示例根主题"]}],
                 "categories": [
                     {
                         "path": "示例根主题/示例子主题",
@@ -190,6 +191,7 @@ def main() -> int:
     summaries.sort(key=lambda item: (-item["size"], item["cluster_id"]))
     payload = {
         "schema_version": TAXONOMY_BOOTSTRAP_CLUSTERS_SCHEMA_VERSION,
+        "task_type": "taxonomy_bootstrap",
         "cluster_count": len(summaries),
         "clusters": summaries,
     }

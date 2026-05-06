@@ -41,6 +41,13 @@ TOKEN_STOPWORDS = {
     "product", "tool", "tools", "general", "read", "free", "download", "downloads", "file", "files",
     "的", "了", "和", "是", "在", "用", "教程", "指南", "文档", "文章", "首页", "官网", "页面",
 }
+REPOSITORY_HOSTS = {"github.com", "gitlab.com", "gitee.com", "bitbucket.org"}
+REPOSITORY_PATH_RESERVED_SEGMENTS = {
+    "about", "apps", "collections", "contact", "dashboard", "docs", "events", "explore", "features",
+    "issues", "login", "marketplace", "new", "notifications", "orgs", "organizations", "pricing",
+    "pulls", "search", "security", "sessions", "settings", "site", "sponsors", "stars", "topics",
+    "trending", "users",
+}
 
 
 DEFAULT_SCORING = {
@@ -77,7 +84,7 @@ DEFAULT_RESOURCE_TYPE_RULES = {
     },
     "仓库": {
         "domains": ["github.com", "gitlab.com", "gitee.com", "bitbucket.org"],
-        "url_patterns": ["/.+/.+"],
+        "url_patterns": [],
         "keywords": ["repository", "repo", "仓库", "source code"],
         "title_patterns": ["GitHub", "GitLab"],
     },
@@ -153,9 +160,16 @@ def signal_text_fields(bookmark: dict[str, Any]) -> dict[str, str]:
             for part in (
                 structure.get("site_name", ""),
                 " ".join(structure.get("brand_terms") or []),
+            )
+            if part
+        ),
+        "site_profile_types": " ".join(
+            part
+            for part in (
                 " ".join(structure.get("site_type_candidates") or []),
                 " ".join(structure.get("page_type_hints") or []),
                 " ".join(structure.get("schema_types") or []),
+                " ".join(structure.get("source_facets") or []),
             )
             if part
         ),
@@ -285,6 +299,14 @@ class BookmarkClassifier:
             return token.upper() if token.lower() in {"api", "sdk", "cli", "llm", "aws", "gcp", "css", "html", "json", "yaml"} else token.capitalize()
         return token.capitalize()
 
+    @staticmethod
+    def _leading_title_segment(value: str) -> str:
+        text = re.sub(r"\s+", " ", (value or "").strip())
+        if not text:
+            return ""
+        segments = [segment.strip() for segment in re.split(r"\s*[|｜]\s*|\s+[—–-]\s+", text) if segment.strip()]
+        return segments[0] if segments else text
+
     def _is_generic_platform_bookmark(self, bookmark: dict) -> bool:
         parsed = urlparse(bookmark.get("url", ""))
         domain = (bookmark.get("domain") or parsed.netloc).lower()
@@ -306,6 +328,30 @@ class BookmarkClassifier:
 
     def _collect_text_fields(self, bookmark: dict) -> dict[str, str]:
         return signal_text_fields(bookmark)
+
+    @staticmethod
+    def _path_segments(path: str) -> list[str]:
+        return [segment for segment in (path or "").split("/") if segment]
+
+    def _looks_like_repository_url(self, bookmark: dict, *, parsed_url: Any | None = None) -> bool:
+        text_fields = self._collect_text_fields(bookmark)
+        parsed = parsed_url or urlparse(bookmark.get("url", ""))
+        domain = text_fields["domain"].lower()
+        registered_domain = domain
+        domain_parts = [part for part in domain.split(".") if part]
+        if len(domain_parts) >= 2:
+            registered_domain = ".".join(domain_parts[-2:])
+        if registered_domain not in REPOSITORY_HOSTS:
+            return False
+        segments = [segment.lower() for segment in self._path_segments(parsed.path)]
+        if len(segments) < 2:
+            return False
+        owner, repo = segments[:2]
+        if owner in REPOSITORY_PATH_RESERVED_SEGMENTS or repo in REPOSITORY_PATH_RESERVED_SEGMENTS:
+            return False
+        if owner.startswith("-") or repo.startswith("-"):
+            return False
+        return True
 
     def calculate_domain_score(self, bookmark: dict, category_rules: dict) -> int:
         domain = self._collect_text_fields(bookmark)["domain"].lower()
@@ -404,15 +450,22 @@ class BookmarkClassifier:
         scores = Counter()
         evidence = defaultdict(list)
         signal_pack = bookmark.get("signal_pack") or build_signal_pack(bookmark)
+        repository_url = self._looks_like_repository_url(bookmark, parsed_url=parsed)
         for facet in signal_pack.get("resource_facets", []):
             scores[facet] += 5
             evidence[facet].append({"signal": "structured_facet", "matched": facet})
         for resource_type, rules in self.resource_type_rules.items():
-            for domain in rules.get("domains", []):
-                domain_value = bookmark.get("domain", "").lower()
-                if domain_value == domain or domain_value.endswith(f".{domain}"):
-                    scores[resource_type] += 4
-                    evidence[resource_type].append({"signal": "domain", "matched": domain})
+            if resource_type == "仓库":
+                if not repository_url:
+                    continue
+                scores[resource_type] += 6
+                evidence[resource_type].append({"signal": "repository_url", "matched": parsed.path})
+            else:
+                for domain in rules.get("domains", []):
+                    domain_value = text_fields["domain"].lower()
+                    if domain_value == domain or domain_value.endswith(f".{domain}"):
+                        scores[resource_type] += 4
+                        evidence[resource_type].append({"signal": "domain", "matched": domain})
             for pattern in rules.get("url_patterns", []):
                 if re.search(pattern, path, re.IGNORECASE):
                     scores[resource_type] += 3
@@ -461,7 +514,8 @@ class BookmarkClassifier:
             signals.append("官方")
         if resource_type == "博客" and domain not in {"", "medium.com"}:
             signals.append("社区")
-        if len(text_fields["description"].strip()) < 20 and len(text_fields["site_profile"].strip()) < 15:
+        profile_signal = " ".join(part for part in (text_fields["site_profile"], text_fields["site_profile_types"]) if part)
+        if len(text_fields["description"].strip()) < 20 and len(profile_signal.strip()) < 15:
             signals.append("低信息量页")
         if topic_scores and topic_scores[0]["total"] >= max(self.scoring["confirm_threshold"], self.scoring["min_score"] + 10):
             signals.append("高频访问候选")
@@ -475,10 +529,14 @@ class BookmarkClassifier:
         parsed = urlparse(bookmark.get("url", ""))
         generic_platform = self._is_generic_platform_bookmark(bookmark)
         raw_tokens: list[tuple[str, str]] = []
-        for source in ("site_profile", "title", "name", "keywords", "url_path"):
+        source_names = ("title", "name", "keywords", "url_path") if generic_platform else ("site_profile", "title", "name", "keywords", "url_path")
+        for source in source_names:
             value = text_fields[source]
+            if generic_platform and source in {"title", "name"}:
+                value = self._leading_title_segment(value)
             raw_tokens.extend((token, source) for token in re.findall(r"[A-Za-z][A-Za-z0-9+#.-]{2,}|[\u4e00-\u9fff]{2,}", value))
-        raw_tokens.extend((segment, "domain") for segment in parsed.netloc.split(".") if len(segment) > 2)
+        if not generic_platform:
+            raw_tokens.extend((segment, "domain") for segment in parsed.netloc.split(".") if len(segment) > 2)
 
         known_topic_tokens = {
             part.lower()
@@ -648,19 +706,21 @@ class BookmarkClassifier:
         site_name = text_fields["site_name"].strip()
         if (
             site_name
+            and not generic_platform
             and not self._is_source_like_topic_token(site_name)
-            and not (generic_platform and self._is_generic_platform_token(site_name))
         ):
             hints.append(site_name)
 
-        for value in (
-            text_fields["brand_terms"],
-            text_fields["name"],
-            text_fields["title"],
-            text_fields["h1"],
-            text_fields["keywords"],
-            text_fields["url_path"],
+        for source_name, value in (
+            ("brand_terms", text_fields["brand_terms"]),
+            ("name", text_fields["name"]),
+            ("title", text_fields["title"]),
+            ("h1", text_fields["h1"]),
+            ("keywords", text_fields["keywords"]),
+            ("url_path", text_fields["url_path"]),
         ):
+            if generic_platform and source_name in {"name", "title", "h1"}:
+                value = self._leading_title_segment(value)
             hints.extend(self._cluster_hint_tokens(value))
 
         for item in topic_scores[:3]:
@@ -738,9 +798,6 @@ class BookmarkClassifier:
             "site_profile": [
                 "structure.site_name",
                 "structure.brand_terms",
-                "structure.site_type_candidates",
-                "structure.page_type_hints",
-                "structure.schema_types",
             ],
             "title": ["content.title_candidates"],
             "name": ["identity.saved_title"],
@@ -748,6 +805,21 @@ class BookmarkClassifier:
             "url_path": ["identity.path_segments"],
             "domain": ["identity.domain", "identity.registrable_domain"],
         }.get(source_name, [])
+
+    def _can_keep_review_required_topic(
+        self,
+        topic_scores: list[dict[str, Any]],
+        raw_rule_confidence: float,
+        auto_assign_confidence: float,
+    ) -> bool:
+        if not topic_scores or raw_rule_confidence < auto_assign_confidence:
+            return False
+        top_score = float(topic_scores[0].get("total", 0.0) or 0.0)
+        minimum_score = max(
+            float(self.scoring.get("min_score", 15)),
+            float(self.scoring.get("confirm_threshold", 25)),
+        )
+        return top_score >= minimum_score and self._is_strong_rule_evidence(topic_scores[0])
 
     def _collect_signal_usage(
         self,
@@ -896,13 +968,21 @@ class BookmarkClassifier:
         runner_up_score = topic_scores[1]["total"] if len(topic_scores) > 1 else 0.0
         raw_rule_confidence = self._rule_confidence(topic_scores)
         rule_confidence = raw_rule_confidence
+        auto_assign_confidence = float(self.scoring.get("auto_assign_confidence", 0.55))
         review_required = bool(link_health.get("review_required"))
         review_penalty_applied = False
+        review_topic_preserved = False
         if review_required and not link_health.get("trusted_override"):
-            rule_confidence = min(rule_confidence, 0.45)
-            review_penalty_applied = rule_confidence != raw_rule_confidence
+            review_topic_preserved = self._can_keep_review_required_topic(
+                topic_scores,
+                raw_rule_confidence,
+                auto_assign_confidence,
+            )
+            if not review_topic_preserved:
+                review_cap = max(0.0, auto_assign_confidence - 0.1)
+                rule_confidence = min(rule_confidence, review_cap)
+                review_penalty_applied = rule_confidence != raw_rule_confidence
             quality_signals = sorted(set(quality_signals + ["待审阅"]))
-        auto_assign_confidence = float(self.scoring.get("auto_assign_confidence", 0.55))
         llm_assignment = self._lookup_assignment(bookmark)
         llm_assignment_applied = False
         assignment_confidence = 0.0
@@ -1026,6 +1106,7 @@ class BookmarkClassifier:
             "final_rule_confidence": rule_confidence,
             "strong_rule_evidence": bool(topic_scores and self._is_strong_rule_evidence(topic_scores[0])),
             "review_penalty_applied": review_penalty_applied,
+            "review_topic_preserved": review_topic_preserved,
             "llm_assignment_confidence": assignment_confidence,
             "llm_assignment_applied": llm_assignment_applied,
         }

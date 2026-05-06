@@ -61,6 +61,11 @@ def top_open_topic(bookmark: dict[str, Any]) -> str:
     return str(candidates[0].get("topic") or "").strip()
 
 
+def confirmation_bucket(bookmark: dict[str, Any]) -> str:
+    classification = bookmark.get("classification", {}) if isinstance(bookmark.get("classification"), dict) else {}
+    return str(classification.get("confirmation_bucket") or "low_confidence").strip().lower()
+
+
 def stable_bundle_id(identities: list[str]) -> str:
     digest = hashlib.sha1("\n".join(sorted(identities)).encode("utf-8")).hexdigest()[:12]
     return f"tf_{digest}"
@@ -80,6 +85,7 @@ def summarize_bookmarks(bookmarks: list[dict[str, Any]], *, generic_platform_dom
     resource_types = Counter()
     domains = Counter()
     rule_candidates = Counter()
+    confirmation_buckets = Counter()
     representative_bookmarks = []
     identities = []
 
@@ -95,6 +101,7 @@ def summarize_bookmarks(bookmarks: list[dict[str, Any]], *, generic_platform_dom
                 cluster_hints[str(hint)] += 1
         resource_type = str(bookmark.get("classification", {}).get("resource_type") or "未知")
         resource_types[resource_type] += 1
+        confirmation_buckets[confirmation_bucket(bookmark)] += 1
         domain = bookmark_registered_domain(bookmark)
         if domain:
             domains[domain] += 1
@@ -127,6 +134,7 @@ def summarize_bookmarks(bookmarks: list[dict[str, Any]], *, generic_platform_dom
         "top_open_topics": _counter_rows(open_topics, key_name="topic"),
         "top_cluster_hints": _counter_rows(cluster_hints, key_name="hint"),
         "resource_type_distribution": _counter_rows(resource_types, key_name="resource_type"),
+        "confirmation_bucket_distribution": _counter_rows(confirmation_buckets, key_name="confirmation_bucket"),
         "top_domains": [
             {
                 "domain": domain,
@@ -155,6 +163,28 @@ def bundle_from_cluster(
         "bundle_type": "cluster",
         "source_cluster_id": profile.get("cluster_id"),
         "cluster_label": profile.get("cluster_label"),
+        "support_count": summary["support_count"],
+        **summary,
+    }
+
+
+def bundle_from_tidy_semantic(
+    bundle: dict[str, Any],
+    *,
+    generic_platform_domains: set[str],
+) -> dict[str, Any]:
+    bookmarks = list(bundle.get("bookmarks") or [])
+    summary = summarize_bookmarks(bookmarks, generic_platform_domains=generic_platform_domains)
+    bundle_id = str(bundle.get("bundle_id") or stable_bundle_id(summary["bookmark_identities"]))
+    return {
+        "bundle_id": bundle_id,
+        "cluster_id": bundle_id,
+        "bundle_type": "tidy_semantic",
+        "source_cluster_id": "",
+        "cluster_label": str(bundle.get("bundle_label") or ""),
+        "bucket_name": str(bundle.get("bucket_name") or ""),
+        "root_hint": str(bundle.get("root_hint") or ""),
+        "source_types": list(bundle.get("source_types") or []),
         "support_count": summary["support_count"],
         **summary,
     }
@@ -195,13 +225,18 @@ def build_followup_bundles(
     eligible = [
         bookmark
         for bookmark in bookmarks
-        if bookmark.get("classification", {}).get("confirmation_bucket") == "rule_gap"
+        if confirmation_bucket(bookmark) in {"rule_gap", "low_confidence"}
         and not bookmark.get("classification", {}).get("review_required")
     ]
-    eligible_identities = {bookmark_identity(bookmark) for bookmark in eligible}
+    eligible_identities = {
+        bookmark_identity(bookmark)
+        for bookmark in eligible
+        if bookmark_identity(bookmark)
+    }
 
     selected_identities: set[str] = set()
     bundles: list[dict[str, Any]] = []
+    tidy_clusterer = cluster_module.BookmarkClusterer(generic_platform_domains=generic_platform_domains)
     for profile in cluster_profiles:
         if profile.get("destination_root") != tidy_root_name:
             continue
@@ -221,19 +256,47 @@ def build_followup_bundles(
         )
         selected_identities.update(bookmark_identity(bookmark) for bookmark in profile_bookmarks)
 
-    aggregated: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    remaining_by_bucket: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for bookmark in eligible:
         identity = bookmark_identity(bookmark)
         if not identity or identity in selected_identities:
             continue
-        topic = normalize_topic_token(top_open_topic(bookmark))
-        if not topic:
-            continue
-        resource_type = str(bookmark.get("classification", {}).get("resource_type") or "未知")
-        domain = bookmark_registered_domain(bookmark)
-        if is_generic_platform_domain(domain, generic_platform_domains):
-            domain = ""
-        aggregated[(topic, resource_type, domain)].append(bookmark)
+        remaining_by_bucket[confirmation_bucket(bookmark)].append(bookmark)
+
+    for bucket, bucket_bookmarks in sorted(remaining_by_bucket.items()):
+        bundles_from_bucket, leftovers = cluster_module.build_tidy_semantic_bundles(
+            tidy_clusterer,
+            bucket_bookmarks,
+            bucket_name=cluster_module.TIDY_BUCKET_DISPLAY_NAMES.get(bucket, cluster_module.TIDY_BUCKET_DISPLAY_NAMES["low_confidence"]),
+            tidy_root_name=tidy_root_name,
+        )
+        for bundle in bundles_from_bucket:
+            bundles.append(
+                bundle_from_tidy_semantic(
+                    bundle,
+                    generic_platform_domains=generic_platform_domains,
+                )
+            )
+            for bookmark in bundle.get("bookmarks", []):
+                identity = bookmark_identity(bookmark)
+                if identity:
+                    selected_identities.add(identity)
+        remaining_by_bucket[bucket] = leftovers
+
+    aggregated: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    for leftovers in remaining_by_bucket.values():
+        for bookmark in leftovers:
+            identity = bookmark_identity(bookmark)
+            if not identity or identity in selected_identities:
+                continue
+            topic = normalize_topic_token(top_open_topic(bookmark))
+            if not topic:
+                continue
+            resource_type = str(bookmark.get("classification", {}).get("resource_type") or "未知")
+            domain = bookmark_registered_domain(bookmark)
+            if is_generic_platform_domain(domain, generic_platform_domains):
+                domain = ""
+            aggregated[(topic, resource_type, domain)].append(bookmark)
 
     for key, group in sorted(
         aggregated.items(),
@@ -271,7 +334,7 @@ def render_prompt(
     lines = [
         "# Bookmark Taxonomy Follow-up",
         "",
-        "下面是一次针对 `rule_gap` 书签的增量 taxonomy 补全任务。",
+        "下面是一次针对 `待整理` 长尾书签的增量 taxonomy 补全任务。",
         "本项目不会直接调用任何 LLM API；请使用你自己的外部 LLM 或 code agent 读取 `taxonomy_followup_candidates.json` 后返回严格 JSON。",
         "",
         "要求：",
@@ -279,6 +342,7 @@ def render_prompt(
         "- `root_groups` 可省略；省略时表示保留现有 generated taxonomy 里的 root_groups。",
         "- `cluster_assignments[].cluster_id` 必须引用 `taxonomy_followup_candidates.json` 中的 `cluster_id`。",
         "- 不要把 GitHub、知乎、CSDN、YouTube、Stack Overflow 等通用平台当作 topic domain。",
+        "- `bundle_type=cluster` 表示现有 tidy cluster；`bundle_type=tidy_semantic` 表示确定性二次聚合后的 tidy 语义包；`bundle_type=aggregate` 表示剩余长尾的保底聚合。",
         "- `title_patterns` 普通字符串按字面量短语处理；确实需要正则时用 `{ \"regex\": \"...\" }`。",
         "- 只返回一个 fenced `json` 代码块，不要输出解释文字。",
         "",
@@ -319,6 +383,8 @@ def render_prompt(
         lines.extend(
             [
                 f"## {item['cluster_id']} · {item.get('cluster_label') or '未命名'} · support={item['support_count']} · type={item['bundle_type']}",
+                f"- confirmation_bucket_distribution: {json.dumps(item.get('confirmation_bucket_distribution', []), ensure_ascii=False)}",
+                f"- bucket_name/root_hint/source_types: {json.dumps({'bucket_name': item.get('bucket_name'), 'root_hint': item.get('root_hint'), 'source_types': item.get('source_types', [])}, ensure_ascii=False)}",
                 f"- top_open_topics: {json.dumps(item.get('top_open_topics', []), ensure_ascii=False)}",
                 f"- top_cluster_hints: {json.dumps(item.get('top_cluster_hints', []), ensure_ascii=False)}",
                 f"- top_domains: {json.dumps(item.get('top_domains', []), ensure_ascii=False)}",
@@ -393,7 +459,9 @@ def main() -> int:
 
     payload = {
         "schema_version": TAXONOMY_FOLLOWUP_CANDIDATES_SCHEMA_VERSION,
+        "task_type": "taxonomy_followup",
         "bundle_count": len(bundles),
+        "bundle_type_counts": dict(Counter(item.get("bundle_type", "unknown") for item in bundles)),
         "bundles": bundles,
         "existing_root_groups": existing_root_groups,
         "existing_category_samples": existing_category_samples,

@@ -22,16 +22,17 @@ Primary success criteria:
 Read in this order:
 
 1. `README.md`
-2. `RUNBOOK.md`
-3. `QUICK_REFERENCE.md`
-4. `TODO_RUNTIME_FOLLOWUP.md`
-5. `EVIDENCE_DRIVEN_ITERATION.md`
-6. `skill_config.json`
-7. `scripts/common.py`
-8. `scripts/3_fetch_webpage_info.py`
-9. `scripts/4_classify_bookmarks.py`
-10. `scripts/5_cluster_bookmarks.py`
-11. `tests/test_pipeline.py`
+2. `DESIGN_CONSTRAINTS.md`
+3. `RUNBOOK.md`
+4. `QUICK_REFERENCE.md`
+5. `TODO_RUNTIME_FOLLOWUP.md`
+6. `EVIDENCE_DRIVEN_ITERATION.md`
+7. `skill_config.json`
+8. `scripts/common.py`
+9. `scripts/3_fetch_webpage_info.py`
+10. `scripts/4_classify_bookmarks.py`
+11. `scripts/5_cluster_bookmarks.py`
+12. `tests/test_pipeline.py`
 
 ## Current Architecture
 
@@ -63,6 +64,21 @@ Keep these invariants unless the user explicitly asks for a different product be
 - generic platforms should not become topic evidence by domain alone
 - reports should explain why output needs review or rule improvement
 - generated taxonomy and runtime state should stay ignored; source code and docs should be tracked
+
+## Persistent Design Constraints
+
+Treat `DESIGN_CONSTRAINTS.md` as a checked-in contract for future changes.
+
+Agent rules:
+
+- do not solve user-specific coverage gaps by hard-coding personal topic defaults into tracked source
+- do keep tracked defaults generic and reusable across different users
+- do prefer generated taxonomy and assignment files for user-specific specialization
+- do allow LLM-assisted workflows through exported prompts and imported JSON files
+- do not embed direct vendor model API calls into the local pipeline by default
+- do preserve explicit proxy and direct fetch workflows, and surface proxy env guidance when real fetches likely need it
+- do extract reusable corpus-level signals from the current bookmark set when they improve classification or clustering
+- do evaluate the final visible hierarchy for bookmark-bar usability, not only topic purity
 
 ## Generic Platform Policy
 
@@ -302,4 +318,5 @@ A change is ready when:
 - tests pass
 - JSON config loads
 - docs describe actual commands, output paths, and report semantics
+- docs and behavior still comply with `DESIGN_CONSTRAINTS.md`
 - quality metrics do not regress in the direction of folder-only classification, low-confidence normal classification, generic-platform suggestions, or fetch-blocked discovery clusters

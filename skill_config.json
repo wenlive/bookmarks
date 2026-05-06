@@ -71,7 +71,11 @@
       "main_group_name": "主要主题",
       "fallback_group_name": "待整理",
       "discovery_root_name": "发现主题",
-      "tidy_root_name": "待整理"
+      "tidy_root_name": "待整理",
+      "max_direct_normal_roots": 10,
+      "standalone_discovery_min_count": 3,
+      "tidy_semantic_min_support": 2,
+      "tidy_root_fallback_min_count": 3
     }
   },
   "logging": {

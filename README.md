@@ -11,6 +11,10 @@ This repository is a local, configuration-driven pipeline for reorganizing expor
 
 It is optimized for practical output quality rather than perfect taxonomy. The pipeline keeps uncertainty visible, avoids over-trusting stale Chrome folders, treats generic publishing platforms as source signals rather than topics, and emits reports that drive the next round of rule or clustering improvements.
 
+Persistent design constraints are tracked in `DESIGN_CONSTRAINTS.md`. Treat that
+file as part of the product contract before changing classification,
+clustering, fetch behavior, LLM-assisted workflows, or display hierarchy.
+
 ## Current State
 
 The codebase is already on the information-flow version of the pipeline:
@@ -36,6 +40,20 @@ Latest real-input validation is documented in `TODO_RUNTIME_FOLLOWUP.md`. As of 
 - Generic platform domains such as `github.com`, `csdn.net`, `zhihu.com`, `jianshu.com`, `docs.qq.com`, or `medium.com` are not topic domains.
 - More bookmarks in generated HTML does not imply duplication. `待审阅` is an intentional mirror.
 - Generated files in `data/*.json`, `output/`, and `logs/` are not source of truth.
+- Tracked defaults should not become a container for one user's personal topic rules.
+- LLM-assisted improvements should use prompt and file workflows, not built-in live model API calls.
+- Better clustering metrics alone do not justify a bookmark-bar hierarchy that becomes harder to browse.
+
+## Persistent Design Constraints
+
+Read `DESIGN_CONSTRAINTS.md` when changing product behavior. The short version:
+
+- keep tracked defaults generic and reusable across different users
+- keep user-specific topic knowledge in generated taxonomy and assignment files
+- allow LLM-assisted refinement through exported prompts and imported JSON, not direct provider SDK coupling
+- preserve explicit proxy and direct fetch workflows, and surface proxy setup clearly when real runs need it
+- extract more structure from the current user's corpus instead of solving gaps with one-off hard-coded topics
+- optimize the final visible hierarchy for browsing and retrieval, not just purity metrics
 
 ## Primary Command
 
@@ -193,14 +211,17 @@ Broken or suspicious links are not deleted. They remain in the normal hierarchy 
 generated HTML bookmark count >= original input bookmark count
 ```
 
-Default top-level groups are generated from the current run. With no user
-taxonomy, normal roots are grouped under `主要主题`; review and unresolved
-areas stay separate:
+Default top-level groups are generated from the current run. In `auto` display
+mode, normal roots are shown directly at the top level when there are not too
+many of them; only larger root sets are wrapped under `主要主题`. Unresolved and
+review areas stay separate, and very small discovery roots can be grouped under
+`待整理` for display without changing the raw clustering result:
 
 ```text
-主要主题
+数据库
+编程语言
 待整理
-发现主题
+发现主题  # or grouped under 待整理 when extremely small
 待审阅  # only when review items exist
 ```
 
@@ -243,9 +264,9 @@ This writes `data/generated/user_taxonomy.json` and
 when they exist.
 
 Display grouping is data-tolerant: when `clustering_options.root_groups` is empty or
-`clustering_options.display.grouping_mode` is `auto`, the clusterer groups whatever
-root topics exist in the run under `主要主题`, while keeping `待整理` and `发现主题`
-separate.
+`clustering_options.display.grouping_mode` is `auto`, the clusterer decides whether
+normal roots should stay directly top-level or be wrapped for display. `待整理`
+is also restructured by confirmation bucket plus a second semantic aggregation pass.
 
 Taxonomy guidance:
 
@@ -254,7 +275,7 @@ Taxonomy guidance:
 - keep broad source platforms out of topic domains
 - validate taxonomy additions with `taxonomy_bootstrap_clusters.json`, `quality_report.json`, and tests
 
-For a later large one-shot `rule_gap` follow-up without adding any in-repo API dependency:
+For a later large one-shot `待整理` long-tail follow-up without adding any in-repo API dependency:
 
 ```bash
 python3 scripts/generate_taxonomy_followup.py --config skill_config.json
@@ -265,8 +286,10 @@ python3 scripts/6_generate_html.py --config skill_config.json
 ```
 
 This produces `taxonomy_followup_prompt.md` and `taxonomy_followup_candidates.json`
-for your own external LLM or code agent. Save the strict JSON response locally,
-then merge it back with `--merge-existing`.
+for your own external LLM or code agent. The follow-up candidates now include
+existing tidy clusters, deterministic tidy semantic bundles, and leftover long-tail
+aggregates. Save the strict JSON response locally, then merge it back with
+`--merge-existing`.
 
 ## Run Modes
 
@@ -330,6 +353,7 @@ Important metrics:
 ## Document Map
 
 - `README.md`: design contract and current architecture
+- `DESIGN_CONSTRAINTS.md`: persistent product and implementation constraints
 - `RUNBOOK.md`: operating procedures and report interpretation
 - `QUICK_REFERENCE.md`: concise command card
 - `AGENTS.md`: agent implementation guidance
