@@ -1,162 +1,121 @@
 ---
 name: bookmark-organizer-runbook
-description: Follow this runbook to operate the bookmark pipeline, recover from fetch problems, inspect reports, and decide when to rerun individual stages.
+description: 人类操作者的运行手册。说明如何执行主流程、何时重跑哪些阶段、怎么看报告，以及如何排查常见问题。
 ---
 
 # Runbook
 
-## Operating Contract
+## 使用原则
 
-Use this document for day-to-day execution. For design intent and extension rules, read `README.md` and `AGENTS.md`.
+这份文档只回答“怎么跑”和“怎么判断结果”。
 
-Default paths:
+- 服务输入输出契约：看 `SERVICE_CONTRACT.md`
+- Agent 约束：看 `AGENTS.md`
+- 长期设计边界：看 `DESIGN_CONSTRAINTS.md`
+
+## 默认路径
 
 ```text
-input:  data/bookmarks.html
-config: skill_config.json
-output: output/organized_bookmarks.html
+input:   data/bookmarks.html
+config:  skill_config.json
+output:  output/organized_bookmarks.html
+log:     logs/bookmarks_organizer.log
 ```
 
-## Recommended Real Run
-
-When network access matters, the current preferred command is:
-
-```bash
-export https_proxy=http://127.0.0.1:7897
-export http_proxy=http://127.0.0.1:7897
-export all_proxy=socks5://127.0.0.1:7897
-
-./organize.sh data/bookmarks.html skill_config.json --use-proxy --trust-env --direct-retry-after-proxy
-```
-
-Why this is preferred:
-
-- the proxy-first pass captures the majority of reachable pages
-- the built-in direct retry only revisits unresolved rows
-- final fetch stats include `multi_pass_mode`, `pass_summaries`, and `pass_deltas`
-
-## Preflight
-
-Run these checks before a real full run:
+## 预检查
 
 ```bash
 python3 --version
 python3 -c "import bs4, aiohttp"
+```
+
+如需确认网络连通性，可做一次轻量直连测试：
+
+```bash
 python3 -c "import urllib.request; print(urllib.request.urlopen('https://example.com', timeout=10).status)"
 ```
 
-If dependency import fails:
+如果依赖未装：
 
 ```bash
 python3 -m pip install -r requirements.txt
 ```
 
-If your local Python environment has SSL or network issues but `conda` is known-good, use:
+## 标准运行命令
 
-```bash
-conda run -n base ./organize.sh data/bookmarks.html skill_config.json
-```
-
-## Decision Table
-
-| Situation | Command |
-| --- | --- |
-| First normal run | `./organize.sh data/bookmarks.html skill_config.json` |
-| Network needs proxy | `./organize.sh data/bookmarks.html skill_config.json --use-proxy --trust-env --direct-retry-after-proxy` |
-| Want to refresh all pages | `./organize.sh data/bookmarks.html skill_config.json --force-refetch` |
-| Want to discard only fetch cache | `./organize.sh data/bookmarks.html skill_config.json --clear-fetch-cache` |
-| Want to discard all generated state | `./organize.sh data/bookmarks.html skill_config.json --reset-all` |
-| Need a first-pass taxonomy prompt | `./organize.sh data/bookmarks.html skill_config.json --bootstrap-taxonomy` |
-| Applied external taxonomy response | `python3 scripts/apply_taxonomy_response.py --config skill_config.json --response data/generated/taxonomy_response.json`, then rerun steps 4, 5, 6 |
-| Need a one-shot `待整理` long-tail follow-up package | `python3 scripts/generate_taxonomy_followup.py --config skill_config.json` |
-| Changed generated taxonomy or classification logic | rerun steps 4, 5, 6 |
-| Changed only clustering/display logic | rerun steps 5, 6 |
-| Changed only HTML generation | rerun step 6 |
-
-## Normal Run
+### 普通运行
 
 ```bash
 ./organize.sh data/bookmarks.html skill_config.json
 ```
 
-Expected generated files:
-
-```text
-data/parsed_bookmarks.json
-data/bookmarks_with_info.json
-data/classified_bookmarks.json
-data/clustering_result.json
-output/organized_bookmarks.html
-output/reports/duplicates.json
-output/reports/broken_links.json
-output/reports/fetch_hotspots.json
-output/reports/needs_confirmation.json
-output/reports/review_queue.json
-output/reports/rule_suggestions.json
-output/reports/quality_report.json
-output/reports/signal_audit.json
-logs/bookmarks_organizer.log
-```
-
-## Proxy Run
-
-Set proxy variables:
+### 代理优先运行
 
 ```bash
 export https_proxy=http://127.0.0.1:7897
 export http_proxy=http://127.0.0.1:7897
 export all_proxy=socks5://127.0.0.1:7897
-```
 
-Run:
-
-```bash
 ./organize.sh data/bookmarks.html skill_config.json --use-proxy --trust-env --direct-retry-after-proxy
 ```
 
-Important behavior:
+这三个 flag 的语义是：
 
-- `--use-proxy` enables proxy support
-- `--trust-env` lets `aiohttp` read proxy variables from the shell
-- `--direct-retry-after-proxy` performs a second direct pass only for rows still needing review
-- successful rows from the first pass are reused
-- final fetch stats preserve proxy-mode summary and direct-retry summary
+- `--use-proxy`：显式启用代理模式
+- `--trust-env`：从 shell 环境变量读取代理
+- `--direct-retry-after-proxy`：代理首轮后，仅对仍 unresolved 的条目做一次 direct retry
 
-## Force Full Refetch
-
-Use this only when prior metadata is broadly untrusted or when page content should be refreshed completely.
+### 全量忽略成功缓存重抓
 
 ```bash
 ./organize.sh data/bookmarks.html skill_config.json --force-refetch
 ```
 
-With proxy:
+如需配合代理：
 
 ```bash
 ./organize.sh data/bookmarks.html skill_config.json --force-refetch --use-proxy --trust-env --direct-retry-after-proxy
 ```
 
-## Clear Fetch Cache
+## 清理与状态复用
 
-Use this when only fetched metadata should be discarded.
+### 只清抓取缓存
 
 ```bash
 ./organize.sh data/bookmarks.html skill_config.json --clear-fetch-cache
 ```
 
-This deletes the configured fetch cache, then runs the full pipeline.
+当前代码对应删除：
 
-## Reset All Generated State
+```text
+data/bookmarks_with_info.json
+```
 
-Use this after large config or logic changes when stale intermediate files should not survive.
+### 清中间产物、输出和日志
 
 ```bash
 ./organize.sh data/bookmarks.html skill_config.json --reset-all
 ```
 
-This removes configured generated files and report outputs while protecting the source bookmark file passed through `--source`.
+当前代码会清：
 
-## Step-by-step Commands
+- `data/bookmarks.html`
+- `data/parsed_bookmarks.json`
+- `data/bookmarks_with_info.json`
+- `data/classified_bookmarks.json`
+- `data/clustering_result.json`
+- `output/organized_bookmarks.html`
+- `output/reports/`
+- `logs/bookmarks_organizer.log`
+
+当前代码不会清：
+
+- `data/generated/user_taxonomy.json`
+- `data/generated/bookmark_taxonomy_assignments.json`
+
+如果你要“保留抓取缓存但清其他中间结果”，需要手动控制，不能直接把 `--reset-all` 当成那个语义。
+
+## 分步执行
 
 ```bash
 python3 scripts/1_copy_bookmark.py --config skill_config.json --source data/bookmarks.html
@@ -167,21 +126,59 @@ python3 scripts/5_cluster_bookmarks.py --config skill_config.json
 python3 scripts/6_generate_html.py --config skill_config.json
 ```
 
-## Taxonomy Bootstrap
+## 局部重跑
 
-The default repository has no checked-in category rule files. A first run can
-cluster with open-topic evidence, then produce an external-LLM prompt:
+### taxonomy 或分类逻辑变了
+
+```bash
+python3 scripts/4_classify_bookmarks.py --config skill_config.json
+python3 scripts/5_cluster_bookmarks.py --config skill_config.json
+python3 scripts/6_generate_html.py --config skill_config.json
+```
+
+### 聚类或显示逻辑变了
+
+```bash
+python3 scripts/5_cluster_bookmarks.py --config skill_config.json
+python3 scripts/6_generate_html.py --config skill_config.json
+```
+
+### 只改了 HTML 渲染
+
+```bash
+python3 scripts/6_generate_html.py --config skill_config.json
+```
+
+## taxonomy bootstrap
+
+### 生成 prompt bundle
 
 ```bash
 ./organize.sh data/bookmarks.html skill_config.json --bootstrap-taxonomy
 ```
 
-Give `output/reports/taxonomy_bootstrap_prompt.md` to the external model. Keep
-`output/reports/taxonomy_bootstrap_clusters.json` locally as the structured
-evidence backing that prompt.
+这一步会：
 
-After receiving strict JSON, save it as `data/generated/taxonomy_response.json`
-and apply it:
+- 跑到 classify 为止
+- 生成 bootstrap prompt bundle
+- 直接结束，不继续执行 cluster/html
+
+产物：
+
+```text
+output/reports/taxonomy_bootstrap_prompt.md
+output/reports/taxonomy_bootstrap_clusters.json
+```
+
+### 应用外部 LLM 响应
+
+把响应保存为：
+
+```text
+data/generated/taxonomy_response.json
+```
+
+然后执行：
 
 ```bash
 python3 scripts/apply_taxonomy_response.py --config skill_config.json --response data/generated/taxonomy_response.json
@@ -190,34 +187,39 @@ python3 scripts/5_cluster_bookmarks.py --config skill_config.json
 python3 scripts/6_generate_html.py --config skill_config.json
 ```
 
-This writes ignored generated state:
+### 重要约束
 
-```text
-data/generated/user_taxonomy.json
-data/generated/bookmark_taxonomy_assignments.json
-```
+- 响应必须匹配 strict JSON schema
+- `title_patterns` 默认按 literal phrase 处理
+- 确实需要正则时，才使用 `{ "regex": "..." }`
+- 不要把 GitHub、知乎、CSDN、Medium、Stack Overflow 之类 broad platform 写成 topic domain
 
-External `title_patterns` are treated as literal phrases by default. Use object
-form such as `{"regex": "..."}` only when a real regular expression is intended.
+## taxonomy follow-up
 
-## Taxonomy Follow-up
+当 bootstrap 后仍有大量 `rule_gap` 时，再做 follow-up。
 
-When the first generated taxonomy still leaves many `rule_gap` items in `待整理`,
-produce a single larger follow-up package instead of many small API calls:
+### 生成 follow-up 候选包
 
 ```bash
 python3 scripts/generate_taxonomy_followup.py --config skill_config.json
 ```
 
-This writes:
+产物：
 
 ```text
-output/reports/taxonomy_followup_candidates.json
 output/reports/taxonomy_followup_prompt.md
+output/reports/taxonomy_followup_candidates.json
 ```
 
-Give those files to your own external LLM or code agent. Save the strict JSON
-response as `data/generated/taxonomy_followup_response.json`, then merge it:
+### 合并 follow-up 响应
+
+把响应保存为：
+
+```text
+data/generated/taxonomy_followup_response.json
+```
+
+执行：
 
 ```bash
 python3 scripts/apply_taxonomy_response.py --config skill_config.json --response data/generated/taxonomy_followup_response.json --clusters output/reports/taxonomy_followup_candidates.json --merge-existing
@@ -226,272 +228,127 @@ python3 scripts/5_cluster_bookmarks.py --config skill_config.json
 python3 scripts/6_generate_html.py --config skill_config.json
 ```
 
-Proxy-first fetch with built-in direct retry:
-
-```bash
-python3 scripts/3_fetch_webpage_info.py --config skill_config.json --use-proxy --trust-env --direct-retry-after-proxy
-```
-
-Common partial reruns:
-
-```bash
-# Rebuild downstream artifacts from existing fetch output.
-python3 scripts/4_classify_bookmarks.py --config skill_config.json
-python3 scripts/5_cluster_bookmarks.py --config skill_config.json
-python3 scripts/6_generate_html.py --config skill_config.json
-
-# Rebuild clusters and HTML after clustering logic changes.
-python3 scripts/5_cluster_bookmarks.py --config skill_config.json
-python3 scripts/6_generate_html.py --config skill_config.json
-
-# Rebuild only HTML after display/template changes.
-python3 scripts/6_generate_html.py --config skill_config.json
-```
-
-## Latest Validated Baseline
-
-Real-input validation on `2026-04-28` is recorded in `TODO_RUNTIME_FOLLOWUP.md`.
-
-Headline metrics from that run:
-
-- input bookmarks: `1014`
-- duplicate URL groups: `92`
-- unique domains: `439`
-- fetch success: `745`
-- fetch review queue: `269`
-- generated taxonomy categories: `41`
-- generated cluster assignments: `371`
-- classify `待确认`: `470`
-- classify `待整理`: `407`
-- cluster count: `623`
-- discovery clusters: `1`
-- mixed clusters: `5`
-- generic-platform clusters: `235`
-- largest generic-platform cluster size: `11`
-
-Guardrail metrics from that run:
-
-- `folder_only_classification_count = 0`
-- `low_confidence_normal_category_count = 0`
-- `generic_platform_domain_suggestion_count = 0`
-- `fetch_blocked_discovery_cluster_count = 0`
-
-Use that file as the continuation baseline when doing behavior-sensitive work.
-
-## Report Semantics
+## 最应该看的报告
 
 ### `duplicates.json`
 
-Duplicate normalized bookmark URLs from parsing.
-
-Use it to identify source bookmark duplication, not fetch or classification issues.
-
-### `broken_links.json`
-
-Only HTTP-broken rows that stayed in `fetch_status == "broken"` and were not suppressed by trusted-access policy.
-
-Typical contents:
-
-- `404`
-- `403`
-- `521`
-- similar HTTP error statuses
-
-This file is intentionally narrower than `review_queue.json`.
+- 看原始 URL 去重情况
+- 用来解释为什么解析后书签数可能少于输入 HTML 中的 `<A>` 数
 
 ### `review_queue.json`
 
-All rows whose final `link_health.review_required == true`.
-
-This includes:
-
-- HTTP errors
-- DNS/connection failures
-- timeouts
-- certificate failures
-- invalid URLs
-
-Trusted-access policy is disabled by default. If a local config enables it, keep
-site rules narrow and document why review suppression is acceptable.
+- 看所有 review-required 的抓取异常
+- 它是“待审阅”的数据基础，不等于真的坏链
 
 ### `fetch_hotspots.json`
 
-Fetch-review hotspots grouped by domain.
-
-Current sections include:
-
-- `review_count`
-- `reason_codes`
-- `routes`
-- `pass_deltas`
-- `representative_urls`
-
-Use this before changing fetch behavior. If the same domains dominate review
-traffic, prefer narrow `fetch_options.domain_overrides` or transport tuning over
-taxonomy changes.
+- 看失败热点域名和原因分布
+- 如果用了代理直连双通路，这里会体现多轮抓取的净变化
 
 ### `needs_confirmation.json`
 
-Classification results that did not meet the assignment bar.
-
-Important fields to inspect:
-
-- confirmation bucket
-- confirmation reasons
-- top decision drivers
-- open topic candidates
-
-This is the main report for deciding whether uncertainty came from:
-
-- fetch blockage
-- generated taxonomy coverage gaps
-- low-confidence matches
+- 看哪些条目仍然不能稳定归入正常主题
+- 重点关注三个 bucket：
+  - `rule_gap`
+  - `fetch_blocked`
+  - `low_confidence`
 
 ### `rule_suggestions.json`
 
-Structured taxonomy and clustering improvement suggestions.
-
-Current suggestion types include:
-
-- `add_alias`
-- `add_specific_domain`
-- `create_topic`
-- `split_mixed_cluster`
-- `investigate_fetch_failures`
-
-Do not apply suggestions blindly. Check representative bookmarks first.
+- 这是基于本次输入动态生成的规则建议
+- 它不是固定写死的默认规则文件
+- 用来辅助判断是否值得补 generated taxonomy
 
 ### `quality_report.json`
 
-Main quality summary. Current sections include:
-
-- `metrics`
-- `largest_discovery_clusters`
-- `largest_tidy_clusters`
-- `largest_mixed_clusters`
-- `largest_generic_platform_clusters`
-- `largest_fetch_blocked_clusters`
-- `largest_flat_normal_roots`
-- `review_hotspots`
-
-Key metrics to watch:
-
-- `folder_only_classification_count`
-- `low_confidence_normal_category_count`
-- `generic_platform_domain_suggestion_count`
-- `fetch_blocked_discovery_cluster_count`
-- `mixed_cluster_count`
-- `normal_root_direct_bookmark_share`
-- `flat_normal_root_count`
+- 看整体质量护栏是否破坏
+- 最重要的守门指标：
+  - `folder_only_classification_count == 0`
+  - `low_confidence_normal_category_count == 0`
+  - `generic_platform_domain_suggestion_count == 0`
+  - `fetch_blocked_discovery_cluster_count == 0`
 
 ### `signal_audit.json`
 
-Signal collection and consumption audit.
+- 看抓到了哪些信号、真正用上了哪些信号
+- 适合在“要加新 signal 还是加新规则”之间做判断
 
-Current sections include:
+## 如何理解结果层级
 
-- `summary`
-- `families`
-- `fields`
-- `unused_high_value_signals`
-- `hotspots`
+- `待审阅`：抓取层面需要复核，链接并不一定已失效
+- `待整理`：证据不足，不应该冒险塞进正常主题
+- `发现主题`：有一定聚合意义，但当前 taxonomy 还不支持稳定落位
 
-Use this before adding new fetch heuristics. Prefer consuming existing collected signals first.
+输出 HTML 中书签数大于输入，并不自动表示有重复，常见原因是：
 
-## Review Workflow After A Real Run
+- `待审阅` 镜像
 
-Inspect in this order:
+## 常见排障
 
-1. `output/reports/review_queue.json`
-2. `output/reports/needs_confirmation.json`
-3. `output/reports/quality_report.json`
-4. `output/reports/rule_suggestions.json`
-5. `output/reports/signal_audit.json`
-6. `output/organized_bookmarks.html`
+### 抓取失败过多
 
-Interpretation:
+先区分问题来源：
 
-- `待审阅`: link health problem or suspicious fetch state
-- `待整理`: not enough reliable evidence for normal-category assignment
-- `发现主题`: cluster has meaningful but unsupported topic concentration
-- `rule_suggestions.json`: next likely rule or clustering work
-- `signal_audit.json`: missing use of already-collected evidence
+- transport 问题：代理、DNS、timeout、证书
+- 站点策略问题：`access_denied`、疑似反爬
+- 页面真实失效：`not_found`
 
-## Expected Count Difference
+建议路径：
 
-If `review_hierarchy` is present, reviewed bookmarks are mirrored into `待审阅`.
+1. 先看 `review_queue.json`
+2. 再看 `fetch_hotspots.json`
+3. 如需真实抓取，优先尝试代理优先模式
+4. 不要先用 taxonomy 规则掩盖抓取问题
 
-So:
+### `待整理` 太多
 
-```text
-generated HTML bookmark count = main hierarchy count + review mirror count
-```
+优先判断是哪一种：
 
-This is expected. Validate uniqueness in the main hierarchy, not by raw HTML count alone.
+- `rule_gap`：说明需要 generated taxonomy 或 follow-up
+- `fetch_blocked`：说明抓取信息不足
+- `low_confidence`：说明现有证据不足以稳定归类
 
-## Troubleshooting
+先看：
 
-### Dependency Import Fails
+- `needs_confirmation.json`
+- `rule_suggestions.json`
+- `signal_audit.json`
 
-Run:
+### `发现主题` 命名噪声太大
+
+这通常意味着：
+
+- taxonomy 覆盖还不够
+- 聚类命名仍受 source-like token 干扰
+
+不要直接把这些名字硬编码进 tracked default source，优先判断它们是否值得进入 generated taxonomy。
+
+### 正常结果被历史 generated taxonomy 污染
+
+检查这两个文件是否还存在：
+
+- `data/generated/user_taxonomy.json`
+- `data/generated/bookmark_taxonomy_assignments.json`
+
+它们存在时，普通运行会自动消费。
+如果你要做纯基线重跑，需要单独处理它们。
+
+### LLM 响应导入失败
+
+先检查：
+
+- 是否包含合法 JSON
+- `schema_version` 是否正确
+- `cluster_id` 是否来自对应的 prompt bundle
+- 是否把 broad platform 当成 topic domain
+
+可直接查看：
 
 ```bash
-python3 -m pip install -r requirements.txt
+python3 scripts/apply_taxonomy_response.py --help
 ```
 
-### Fetch Produces Too Many Failures
-
-Use the preferred proxy command:
-
-```bash
-./organize.sh data/bookmarks.html skill_config.json --use-proxy --trust-env --direct-retry-after-proxy
-```
-
-If the fetch cache is stale:
-
-```bash
-./organize.sh data/bookmarks.html skill_config.json --clear-fetch-cache --use-proxy --trust-env --direct-retry-after-proxy
-```
-
-If the failures are concentrated on a few domains, inspect:
-
-- `output/reports/review_queue.json`
-- `output/reports/fetch_hotspots.json`
-- `output/reports/quality_report.json`
-- `TODO_RUNTIME_FOLLOWUP.md`
-
-### Too Many Items In `待整理`
-
-Inspect:
-
-```text
-output/reports/needs_confirmation.json
-output/reports/rule_suggestions.json
-output/reports/quality_report.json
-output/reports/signal_audit.json
-```
-
-Then decide whether the main issue is:
-
-- fetch blockage
-- generated taxonomy gaps
-- generic-platform naming noise
-- mixed clusters
-
-### Generic Platform Cluster Is Too Large
-
-Inspect `largest_generic_platform_clusters` in `quality_report.json`.
-
-Prefer these fixes:
-
-- remove source/platform tokens from cluster labels and hints
-- add precise non-platform topic aliases through generated taxonomy
-- add topic-specific project/product domains through generated taxonomy
-- split mixed clusters earlier
-
-Avoid adding `github.com`, `csdn.net`, `zhihu.com`, `docs.qq.com`, or similar broad domains to topic categories.
-
-## Validation Before Commit
+## 提交前检查
 
 ```bash
 python3 -m py_compile scripts/common.py scripts/1_copy_bookmark.py scripts/2_parse_bookmarks.py scripts/3_fetch_webpage_info.py scripts/4_classify_bookmarks.py scripts/5_cluster_bookmarks.py scripts/6_generate_html.py scripts/generate_taxonomy_bootstrap.py scripts/generate_taxonomy_followup.py scripts/apply_taxonomy_response.py scripts/reset_pipeline_state.py

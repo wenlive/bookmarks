@@ -1,84 +1,65 @@
 ---
 name: bookmark-organizer-design-constraints
-description: Persistent design constraints that future code, prompts, reports, and workflow changes must continue to follow.
+description: 长期稳定的产品和实现约束。代码、prompt、报告和工作流的行为改动都必须继续遵守这些约束。
 ---
 
 # Design Constraints
 
 ## Purpose
 
-This file records product and implementation constraints that should survive
-future refactors, taxonomy changes, prompt changes, and agent-driven
-iterations.
+这份文档记录应该跨越重构和运行轮次长期保持稳定的约束。
 
-Treat these constraints as part of the checked-in design contract, not as a
-one-off discussion note.
+它不是运行手册，也不是历史记录。
+如果某个行为变化违反了这里的规则，应视为设计回退，而不是中性重构。
 
-## 1. User-General, Not User-Hardcoded
+## 1. 通用化优先，不把当前用户分布写进默认行为
 
-The checked-in repository should stay useful across different users with
-different bookmark distributions, interests, and topic vocabularies.
+Tracked source 必须服务不同用户，而不是围绕当前一份书签集定制。
 
-Required behavior:
+必须保持：
 
-- do not hard-code personal topic trees, personal trusted domains, or broad
-  one-off rules as the default classifier behavior
-- keep tracked defaults focused on generic guardrails, resource typing,
-  intent labels, quality signals, generic-platform suppression, and explainable
-  confidence thresholds
-- put user-specific topic constraints in generated files such as
-  `data/generated/user_taxonomy.json` and
-  `data/generated/bookmark_taxonomy_assignments.json`
-- prefer reusable signals and scoring over direct `if domain == ... then category`
-  logic whenever the decision should generalize across users
+- 不把个人主题树、个人 trusted domain、个人偏好目录结构硬编码进默认逻辑
+- Tracked default 只承载通用 guardrail、资源类型、质量信号、generic-platform suppression 和 explainable threshold
+- 用户特定 specialization 放入 generated files，而不是放入 tracked source
+- 能用 reusable signal 解决的问题，优先不用 `if domain == ... then category` 式 one-off 规则
 
-When a heuristic only works for one user's corpus, it belongs in generated
-taxonomy or assignment outputs, not in tracked default logic.
+用户级 specialization 的推荐落点：
 
-## 2. LLM-Aided, Not LLM-Embedded
+- `data/generated/user_taxonomy.json`
+- `data/generated/bookmark_taxonomy_assignments.json`
 
-LLMs may improve taxonomy generation, cluster follow-up, and targeted
-classification guidance, but the project should not directly embed vendor API
-clients or require a specific hosted model to run.
+## 2. LLM-Aided，而不是 LLM-Embedded
 
-Required behavior:
+LLM 可以参与 taxonomy 生成和 follow-up 补全，但本地默认流水线不应绑定某个在线 provider。
 
-- keep LLM integration file-based and schema-based
-- generate prompts, structured evidence, and strict JSON response contracts
-- accept responses through local files and import scripts
-- assume an external agent or skill can provide formatted LLM I/O
-- do not add direct `call model API from pipeline` behavior as the default path
+必须保持：
 
-Good patterns:
+- LLM integration 通过文件和 schema 进行
+- 本地脚本负责导出 prompt 和 structured evidence
+- 外部 LLM 或 agent 负责产出 strict JSON
+- 本地导入脚本负责回灌 generated taxonomy / assignments
+- 默认路径不引入 direct vendor SDK call
 
-- bootstrap prompt generation
-- follow-up candidate bundles
-- strict response schemas
-- import-and-apply scripts
+当 agent 负责执行完整工作流时，必须保持：
 
-Bad patterns:
+- 不能只生成 prompt 就停下
+- 必须读取 prompt 和其配对的 structured evidence JSON
+- 必须产出 strict schema-valid response JSON
+- 响应仍要遵守 generic-platform suppression 和其他仓库约束
 
-- hidden online API calls during classify or cluster
-- product behavior that silently changes based on model availability
-- coupling the repository to one provider's SDK
+## 3. 网络与代理行为必须显式
 
-## 3. Network And Proxy Behavior Must Stay Explicit
+真实抓取环境里，direct 和 proxy 都可能正确，也都可能失败。
 
-Real-world bookmark fetching may require both VPN/proxy access and direct
-access. The project must continue to support both instead of assuming one
-network path is always correct.
+必须保持：
 
-Required behavior:
+- 保留 direct fetch
+- 保留 proxy fetch
+- 保留 proxy-first plus direct-retry，除非用户明确要求别的策略
+- 在结果里保留抓取 provenance 和失败语义
+- 当真实抓取明显需要代理时，向操作者清楚暴露代理环境变量和 flag 用法
 
-- preserve direct fetch support
-- preserve proxy-enabled fetch support
-- preserve proxy-first plus direct-retry behavior unless the user asks for a
-  different fetch strategy
-- keep fetch provenance visible in outputs and reports
-- prompt the operator for proxy environment variables when real fetching is
-  likely blocked without them
-
-Canonical proxy example:
+标准代理示例：
 
 ```bash
 export https_proxy=http://127.0.0.1:7897
@@ -86,105 +67,91 @@ export http_proxy=http://127.0.0.1:7897
 export all_proxy=socks5://127.0.0.1:7897
 ```
 
-Fetch improvements should separate:
+不要用“放宽 trusted access”去掩盖真实网络不确定性。
 
-- transport problems
-- site policy or anti-bot problems
-- taxonomy or clustering problems
+## 4. 优先从当前用户语料中提取结构
 
-Do not hide network uncertainty by over-broad trusted-access defaults.
+系统应当学习当前用户书签集中反复出现的产品名、项目名、域名家族和稳定标题短语，而不是只依赖全局常见词。
 
-## 4. Extract User-Specific Structure From The User's Corpus
+必须保持：
 
-The system should learn from what is frequent or structurally important inside
-the current user's bookmark set, even when those terms are rare globally.
+- 允许从当前语料提取 corpus-level signal
+- 允许在 prompt bundle 和报告中暴露这些信号
+- 优先把可复用的提取逻辑放进 `signal_pack/v2`
+- 不因为“这是小众主题”就强行退回 tracked hardcode 或忽略用户内部强信号
 
-Required behavior:
+## 5. 输出首先是浏览产品，而不是纯聚类产物
 
-- prefer corpus-derived signals such as repeated product names, project names,
-  domain families, cluster hints, and stable title phrases
-- treat within-user high-frequency but globally niche tokens as potential
-  taxonomy guidance
-- surface these signals in reports or LLM prompt bundles instead of forcing
-  them into tracked defaults
-- prefer adding reusable signal extraction in `signal_pack/v2` over duplicating
-  ad hoc extraction logic
+最终 HTML 不是只给指标看的，它是要被人重新导入浏览器继续使用的。
 
-Examples of useful user-specific structure:
+必须保持：
 
-- a niche database project repeatedly appearing across blogs, docs, repos, and
-  papers
-- a product family with multiple domains but consistent title vocabulary
-- a recurring topic token that is too niche for built-in defaults but strong
-  inside one user's corpus
+- 顶层结构适合浏览和重找
+- 正常主题、`待整理`、`发现主题`、`待审阅` 之间保持明确分离
+- 不为了 purity 把正常主题压成少数巨型根目录
+- 也不为了细粒度把大量微小主题炸成顶层噪音
+- cluster label 优先是人能理解的主题名，而不是平台名、栏目名或站点 slogan
 
-## 5. Optimize The Final Bookmark Bar For Browsing And Retrieval
+## 6. 通用平台默认是来源信号，不是主题信号
 
-The final HTML is a browsing product, not only a clustering artifact. Output
-structure should optimize for human scanning, retrieval, and re-finding.
+这些 broad platform 只应默认扮演 source signal：
 
-Required behavior:
+```text
+github.com
+github.io
+gitlab.com
+gitee.com
+bitbucket.org
+stackoverflow.com
+stackexchange.com
+medium.com
+zhihu.com
+csdn.net
+51cto.com
+jianshu.com
+docs.qq.com
+qq.com
+google.com
+notion.so
+youtube.com
+bilibili.com
+```
 
-- keep the top-level folder layout balanced for real browsing
-- avoid collapsing most useful topics into only a few oversized roots
-- avoid exploding many tiny topics into excessive top-level folders
-- avoid creating dedicated visible folders for extremely small themes unless
-  they are strong and worth direct access
-- use grouping and display logic to keep the result browsable on a bookmark bar
-- when changing display routing, inspect whether the output became harder to
-  scan even if topic purity improved
+必须保持：
 
-Working preference:
+- 不把它们作为 tracked default 的 topic domain
+- 不根据这些平台本身创建主题分类
+- 允许 title、description、repo name、product name、schema type、path segment、page content 提供主题证据
 
-- a moderate number of top-level groups
-- meaningful separation between normal roots, `待整理`, `发现主题`, and `待审阅`
-- normal roots that are individually useful, not flat dumps
-- cluster labels that are human-readable topic names, not platform or source
-  noise
+## 7. 状态持久化与变更纪律必须清晰
 
-When changing hierarchy behavior, prefer adding or extending quality metrics
-that reveal:
+必须保持：
 
-- overly flat normal roots
-- too many singleton or tiny visible folders
-- oversized roots hiding many unrelated subtopics
-- deterioration in bookmark-bar scanability
+- 这份文档持续 tracked
+- `README.md`、`SERVICE_CONTRACT.md`、`RUNBOOK.md`、`AGENTS.md` 在行为变化时同步更新
+- generated state 和运行产物保持 ignored
+- 行为级变更要补测试或报告校验，而不是只改代码
 
-## 6. Persistence, Reviewability, And Change Discipline
+在完成行为改动前，至少检查：
 
-These constraints must remain durable across future changes.
+- 是否把当前用户分布写进了 tracked defaults
+- 是否引入了默认在线模型依赖
+- 是否把 direct/proxy 语义写模糊了
+- 是否牺牲浏览层可用性换取表面覆盖率
+- 是否让 `folder_only`、`low_confidence_normal`、`generic_platform_domain_suggestion` 或 `fetch_blocked_discovery` 指标回退
 
-Required behavior:
+## Preferred Patterns
 
-- keep this file tracked in git
-- update `README.md`, `AGENTS.md`, and quick references when these constraints
-  materially change
-- treat changes that violate these rules as design regressions, not neutral
-  refactors
-- add tests or report checks when a new heuristic changes classification,
-  clustering, or display routing behavior
-
-Before finalizing a behavior change, check:
-
-- does it add personal hard-coded topic behavior to tracked defaults
-- does it depend on a built-in live model API
-- does it assume proxy or direct access is always correct
-- does it extract more reusable corpus-specific evidence, or merely add a
-  one-off rule
-- does the final visible hierarchy become easier or harder to browse
-
-## Preferred Implementation Patterns
-
-- generic default guardrails in tracked code
-- user-specific specialization in generated taxonomy and assignment files
-- prompt generation plus strict JSON import for LLM-assisted refinement
-- explainable evidence in classifier and clusterer outputs
-- report-driven iteration grounded in real bookmark exports
+- generic guardrail in tracked code
+- user-specific specialization in generated taxonomy / assignments
+- prompt bundle + strict JSON import for LLM-assisted refinement
+- evidence-driven reports
+- explainable classification and clustering behavior
 
 ## Avoid
 
 - broad platform domains as topic domains
 - folder-only or folder-dominant topic assignment
 - hidden online dependencies in the local pipeline
-- personal topic defaults committed as shared repository logic
-- display structures that optimize purity while becoming awkward to browse
+- personal topic defaults committed into shared source
+- display structures that make the bookmark bar harder to browse

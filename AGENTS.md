@@ -1,40 +1,39 @@
 ---
 name: bookmark-organizer-agent-guide
-description: Agent-facing guide for understanding, operating, debugging, and safely improving this Chrome bookmark organization pipeline.
+description: Agent-facing operating and implementation contract for the Chrome bookmark organization pipeline.
 ---
 
 # Agent Guide
 
 ## Mission
 
-Improve the actual usefulness of generated Chrome bookmarks.
+Improve the actual usefulness of generated Chrome bookmarks without breaking the repository's generic, reusable behavior.
 
 Primary success criteria:
 
 - fewer unrelated bookmarks in the same normal category
 - fewer false assignments caused by stale Chrome folders
-- fewer rules that hard-code broad platforms as topics
-- more useful `待整理`, `发现主题`, `待审阅`, and rule suggestion outputs
-- stable, reproducible commands and reports
+- fewer source/platform labels leaking into topic roots
+- more useful `待整理`、`发现主题`、`待审阅`
+- stable, reproducible commands and report semantics
 
-## First Files To Read
+## Read First
 
 Read in this order:
 
 1. `README.md`
-2. `DESIGN_CONSTRAINTS.md`
-3. `RUNBOOK.md`
-4. `QUICK_REFERENCE.md`
-5. `TODO_RUNTIME_FOLLOWUP.md`
-6. `EVIDENCE_DRIVEN_ITERATION.md`
-7. `skill_config.json`
-8. `scripts/common.py`
-9. `scripts/3_fetch_webpage_info.py`
-10. `scripts/4_classify_bookmarks.py`
-11. `scripts/5_cluster_bookmarks.py`
-12. `tests/test_pipeline.py`
+2. `SERVICE_CONTRACT.md`
+3. `DESIGN_CONSTRAINTS.md`
+4. `RUNBOOK.md`
+5. `QUICK_REFERENCE.md`
+6. `skill_config.json`
+7. `scripts/common.py`
+8. `scripts/3_fetch_webpage_info.py`
+9. `scripts/4_classify_bookmarks.py`
+10. `scripts/5_cluster_bookmarks.py`
+11. `tests/test_pipeline.py`
 
-## Current Architecture
+## Architecture
 
 The project is a six-step local pipeline:
 
@@ -42,47 +41,92 @@ The project is a six-step local pipeline:
 copy -> parse -> fetch -> classify -> cluster -> generate html
 ```
 
-The important design shift is from folder-driven classification to information-flow-driven classification.
-
-The shared `signal_pack/v2` in `scripts/common.py` is the stable handoff between fetch, classification, and clustering. Prefer adding reusable signals there instead of duplicating extraction logic across classifier and clusterer.
-
-Stage outputs are versioned and downstream steps reject stale payloads:
+Stable shared contracts:
 
 - `fetch_output/v2`
 - `classified_output/v2`
 - `clustering_output/v2`
+- `signal_pack/v2`
+
+`signal_pack/v2` in `scripts/common.py` is the preferred place to add reusable signals. Avoid duplicating fetch-derived extraction logic across classifier and clusterer when it can be normalized once there.
 
 ## Invariants
 
-Keep these invariants unless the user explicitly asks for a different product behavior:
+Keep these unless the user explicitly asks for a different product behavior:
 
 - original Chrome folder path is context, not strong topic evidence
-- low-confidence normal-category assignments should be downgraded to `待整理`
-- discovered but unsupported clusters should go to `发现主题`
+- low-confidence normal assignments should downgrade to `待整理`
+- discovered but unsupported clusters should route to `发现主题`
 - broken or suspicious links should be preserved
 - review-required links should be mirrored to `待审阅`
 - generic platforms should not become topic evidence by domain alone
-- reports should explain why output needs review or rule improvement
-- generated taxonomy and runtime state should stay ignored; source code and docs should be tracked
+- reports should explain why the output still needs review or rule work
+- generated taxonomy and runtime state stay ignored; tracked source remains generic
 
-## Persistent Design Constraints
+## External-Service View
 
-Treat `DESIGN_CONSTRAINTS.md` as a checked-in contract for future changes.
+When acting on behalf of a user, treat `SERVICE_CONTRACT.md` as the runtime truth for:
+
+- inputs and outputs
+- file side effects
+- reset semantics
+- network/proxy behavior
+- the two LLM-assisted workflow handoff points
+
+Do not re-infer those semantics from memory when the contract already states them.
+
+## LLM-Assisted Workflow Contract
+
+Current design has exactly two LLM-assisted steps:
+
+1. taxonomy bootstrap
+2. taxonomy follow-up
 
 Agent rules:
 
-- do not solve user-specific coverage gaps by hard-coding personal topic defaults into tracked source
-- do keep tracked defaults generic and reusable across different users
-- do prefer generated taxonomy and assignment files for user-specific specialization
-- do allow LLM-assisted workflows through exported prompts and imported JSON files
-- do not embed direct vendor model API calls into the local pipeline by default
-- do preserve explicit proxy and direct fetch workflows, and surface proxy env guidance when real fetches likely need it
-- do extract reusable corpus-level signals from the current bookmark set when they improve classification or clustering
-- do evaluate the final visible hierarchy for bookmark-bar usability, not only topic purity
+- do not stop after generating a prompt
+- do read the generated prompt file and its paired structured evidence JSON
+- do analyze the current run's actual clusters/candidates before producing a response
+- do produce strict schema-valid response JSON
+- do apply that response through `scripts/apply_taxonomy_response.py`
+- do not embed direct vendor model API calls into the default local pipeline
+
+Required input pairs:
+
+- bootstrap:
+  - `output/reports/taxonomy_bootstrap_prompt.md`
+  - `output/reports/taxonomy_bootstrap_clusters.json`
+- follow-up:
+  - `output/reports/taxonomy_followup_prompt.md`
+  - `output/reports/taxonomy_followup_candidates.json`
+
+## Network And State Rules
+
+When real fetching matters:
+
+- preserve direct fetch support
+- preserve proxy fetch support
+- preserve proxy-first plus direct-retry behavior unless the user asks otherwise
+- surface proxy env guidance when network restrictions are likely
+- keep fetch provenance and failure semantics visible
+
+Canonical proxy example:
+
+```bash
+export https_proxy=http://127.0.0.1:7897
+export http_proxy=http://127.0.0.1:7897
+export all_proxy=socks5://127.0.0.1:7897
+```
+
+State rules:
+
+- normal runs consume existing `data/generated/user_taxonomy.json` and `data/generated/bookmark_taxonomy_assignments.json` when present
+- `--reset-all` does not currently remove those generated taxonomy files
+- if a user wants a pure baseline rerun, generated taxonomy state may need separate cleanup
 
 ## Generic Platform Policy
 
-Generic platform domains include source hosts such as:
+Treat these as source hosts, not topic category domains:
 
 ```text
 github.com
@@ -105,13 +149,15 @@ youtube.com
 bilibili.com
 ```
 
-Agent rule:
+Agent rules:
 
-- do not add these domains as topic category domains
-- do use them to suppress source-like labels
-- do let title, description, repository name, product name, schema type, and page content provide topic evidence
+- do not add these domains as topic domains in tracked defaults
+- do not use them as justification for broad category creation
+- do use title, URL path, product name, schema type, repository name, and page content as topic evidence
 
-## Fetch Layer
+## Layer-Specific Guidance
+
+### Fetch
 
 Primary file:
 
@@ -122,25 +168,18 @@ scripts/3_fetch_webpage_info.py
 Responsibilities:
 
 - fetch page metadata and site/profile signals
-- normalize link health
+- normalize link health and failure reason
 - record fetch provenance in `fetch_context`
-- support proxy-first fetch plus automatic direct retry
+- support proxy-first fetch plus direct retry
 - emit `broken_links.json` and `review_queue.json`
 
-Current known facts:
+When changing fetch:
 
-- real-input validation on `2026-04-28` is already done
-- Brotli decode failures and XML parser warnings were addressed
-- current remaining fetch work is hotspot-domain cleanup, not global fetch failure
+- validate with a real run when transport, retry, parser, or trusted-access behavior changes
+- separate transport problems from site policy problems from taxonomy problems
+- do not hide uncertainty by widening trusted-access defaults
 
-When improving fetch:
-
-- keep proxy-first plus direct-retry behavior intact
-- do not widen trusted-access policy casually
-- separate network failures from taxonomy failures before proposing rule changes
-- validate with a real run when changing transport, retry, parsing, or trusted-access logic
-
-## Classification Layer
+### Classification
 
 Primary file:
 
@@ -150,24 +189,22 @@ scripts/4_classify_bookmarks.py
 
 Responsibilities:
 
-- load the generic base contract plus generated user taxonomy when present
+- load generic base logic plus generated taxonomy when present
 - build or consume `signal_pack/v2`
-- score rule categories
+- score categories
 - infer resource type, intent labels, and quality signals
 - extract dynamic open-topic candidates
-- downgrade low-confidence items to `待整理`
+- downgrade weak normal assignments to `待整理`
 - emit `needs_confirmation.json`
 
-When improving classification:
+When changing classification:
 
-- prefer precise generated taxonomy domains for topic-specific domains
-- prefer title patterns and narrow aliases for stable product/project names
-- prefer content and metadata signals over folder names
-- keep operational fetch terms out of topic extraction
-- add tests for false positive and false negative cases
-- check `low_confidence_normal_category_count` remains `0`
+- prefer aliases, title patterns, and narrow project/product tokens
+- prefer content and metadata over folder names
+- keep fetch operational fields out of topic scoring
+- verify `low_confidence_normal_category_count == 0`
 
-## Clustering Layer
+### Clustering
 
 Primary file:
 
@@ -177,146 +214,62 @@ scripts/5_cluster_bookmarks.py
 
 Responsibilities:
 
-- build feature sets from classification plus `signal_pack/v2`
-- compute similarity
+- build features from classification plus `signal_pack/v2`
+- cluster with explainable similarity
 - prevent generic-platform over-merge
 - decide destination root
 - build display hierarchy
 - emit `rule_suggestions.json`, `quality_report.json`, and `signal_audit.json`
 
-When improving clustering:
+When changing clustering:
 
 - keep similarity explainable
-- penalize cross-topic merges when evidence is weak
-- keep source/platform labels from dominating cluster names
-- add quality metrics when introducing new routing behavior
-- add tests for mixed clusters and generic-platform clusters
+- penalize weak cross-topic merges
+- stop source/platform labels from dominating cluster names
+- add or update quality metrics when changing routing behavior
 
-Current known pain points:
+## Safe And Risky Changes
 
-- discovery naming noise
-- generic-platform cluster naming quality
-- mixed clusters that should split earlier
-- flat normal roots and high direct-bookmark share in some roots
+Safe improvements:
 
-## Generated Taxonomy
+- add a reusable structured signal to `signal_pack`
+- improve report clarity
+- add generated taxonomy aliases, title patterns, or narrow domains through ignored files
+- add regression tests for concrete false positives or false negatives
+- improve cluster routing from weak evidence to `待整理` or `发现主题`
 
-The repository no longer tracks default category rule files. The checked-in base
-classifier only provides generic resource, intent, quality, dynamic-topic, and
-generic-platform guardrails.
+Risky changes:
 
-Generated user-specific constraints live under ignored paths:
+- raising confidence globally to make metrics look better
+- adding broad domains as topic defaults
+- reusing stale folder names as strong evidence
+- optimizing for fewer `待整理` items at the cost of false normal classifications
+- using fetch operational fields such as `homepage_source` as topic evidence
+- hard-coding one user's current topic distribution into tracked source
 
-```text
-data/generated/user_taxonomy.json
-data/generated/bookmark_taxonomy_assignments.json
-```
-
-Preferred workflow:
-
-1. run the pipeline or `./organize.sh data/bookmarks.html skill_config.json --bootstrap-taxonomy`
-2. give `output/reports/taxonomy_bootstrap_prompt.md` to an external LLM
-3. save the strict JSON response as `data/generated/taxonomy_response.json`
-4. run `python3 scripts/apply_taxonomy_response.py --config skill_config.json --response data/generated/taxonomy_response.json`
-5. rerun steps 4, 5, 6
-6. inspect `rule_suggestions.json`, `quality_report.json`, and `signal_audit.json`
-7. validate tests and quality metrics
-
-## Command Policy
-
-Normal run:
-
-```bash
-./organize.sh data/bookmarks.html skill_config.json
-```
-
-Preferred real-network run:
-
-```bash
-export https_proxy=http://127.0.0.1:7897
-export http_proxy=http://127.0.0.1:7897
-export all_proxy=socks5://127.0.0.1:7897
-
-./organize.sh data/bookmarks.html skill_config.json --use-proxy --trust-env --direct-retry-after-proxy
-```
-
-Classification-only downstream rerun:
-
-```bash
-python3 scripts/4_classify_bookmarks.py --config skill_config.json
-python3 scripts/5_cluster_bookmarks.py --config skill_config.json
-python3 scripts/6_generate_html.py --config skill_config.json
-```
-
-## Validation Policy
+## Validation
 
 Before handing work back:
 
 ```bash
-python3 -m py_compile scripts/common.py scripts/1_copy_bookmark.py scripts/2_parse_bookmarks.py scripts/3_fetch_webpage_info.py scripts/4_classify_bookmarks.py scripts/5_cluster_bookmarks.py scripts/6_generate_html.py scripts/generate_taxonomy_bootstrap.py scripts/apply_taxonomy_response.py scripts/reset_pipeline_state.py
+python3 -m py_compile scripts/common.py scripts/1_copy_bookmark.py scripts/2_parse_bookmarks.py scripts/3_fetch_webpage_info.py scripts/4_classify_bookmarks.py scripts/5_cluster_bookmarks.py scripts/6_generate_html.py scripts/generate_taxonomy_bootstrap.py scripts/generate_taxonomy_followup.py scripts/apply_taxonomy_response.py scripts/reset_pipeline_state.py
 python3 -c "import json; json.load(open('skill_config.json'))"
 pytest -q
 git diff --check
 ```
 
-For behavior-sensitive changes, prefer an isolated runtime workspace under `/tmp` so you do not overwrite tracked or user-facing generated files.
+For behavior-sensitive work:
 
-## Evidence-Driven Iteration
-
-When an agent needs to validate this project on a real bookmark export and turn the result into concrete improvements, follow:
-
-```text
-EVIDENCE_DRIVEN_ITERATION.md
-```
-
-Use:
-
-```text
-TODO_RUNTIME_FOLLOWUP.md
-```
-
-as the latest real-run baseline and continuation point.
-
-## Review Reports Before Finalizing
-
-Inspect:
-
-```text
-output/reports/review_queue.json
-output/reports/needs_confirmation.json
-output/reports/rule_suggestions.json
-output/reports/quality_report.json
-output/reports/signal_audit.json
-```
-
-For temporary verification outputs, use the same files under `/tmp` and report the metrics.
-
-## Common Safe Improvements
-
-- add a new structured signal to `signal_pack`
-- add a narrow topic alias, title pattern, assignment, or domain through generated taxonomy
-- add a regression test for misclassification
-- adjust generic-platform token filtering
-- improve cluster destination routing from weak evidence to `待整理` or `发现主题`
-- improve report fields that explain why a cluster needs attention
-
-## Common Risky Changes
-
-- raising confidence globally without real-output validation
-- adding broad domains to a topic category
-- reusing source folder names as strong evidence
-- optimizing for fewer `待整理` items at the cost of false normal classifications
-- treating `review_hierarchy` mirror count as duplicate output
-- changing generated output shape without updating `scripts/6_generate_html.py` tests
-- using fetch operational fields such as `homepage_source` as topic evidence
+- prefer an isolated runtime under `/tmp`
+- inspect `review_queue.json`, `fetch_hotspots.json`, `needs_confirmation.json`, `rule_suggestions.json`, `quality_report.json`, `signal_audit.json`
+- compare report semantics, not just visible HTML
 
 ## Commit Readiness
 
 A change is ready when:
 
-- worktree only contains intended source/docs/test changes
-- tests pass
-- JSON config loads
-- docs describe actual commands, output paths, and report semantics
-- docs and behavior still comply with `DESIGN_CONSTRAINTS.md`
-- quality metrics do not regress in the direction of folder-only classification, low-confidence normal classification, generic-platform suggestions, or fetch-blocked discovery clusters
+- docs match actual code behavior
+- tests and checks pass
+- generated state is not mistakenly committed
+- no tracked default logic has been bent toward one user's current dataset
+- output quality does not regress on folder-only classification, low-confidence normal classification, generic-platform suggestions, or fetch-blocked discovery routing
