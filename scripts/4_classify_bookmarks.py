@@ -526,10 +526,23 @@ class BookmarkClassifier:
 
     def _extract_dynamic_topic_candidates(self, bookmark: dict, matched_topics: list[str]) -> list[dict[str, Any]]:
         text_fields = self._collect_text_fields(bookmark)
+        signal_pack = bookmark.get("signal_pack") or build_signal_pack(bookmark)
+        sections = signal_pack_sections(signal_pack)
+        structure = sections["structure"]
+        health_access = sections["health_access"]
         parsed = urlparse(bookmark.get("url", ""))
         generic_platform = self._is_generic_platform_bookmark(bookmark)
+        homepage_only_source = (
+            str(health_access.get("fetch_status") or "") != "success"
+            and str(structure.get("homepage_fetch_status") or "") == "success"
+            and str(structure.get("homepage_source") or "") == "fetched"
+        )
         raw_tokens: list[tuple[str, str]] = []
-        source_names = ("title", "name", "keywords", "url_path") if generic_platform else ("site_profile", "title", "name", "keywords", "url_path")
+        source_names = (
+            ("title", "name", "keywords", "url_path")
+            if generic_platform or homepage_only_source
+            else ("site_profile", "title", "name", "keywords", "url_path")
+        )
         for source in source_names:
             value = text_fields[source]
             if generic_platform and source in {"title", "name"}:
@@ -697,7 +710,16 @@ class BookmarkClassifier:
         dynamic_candidates: list[dict[str, Any]],
     ) -> list[str]:
         text_fields = self._collect_text_fields(bookmark)
+        signal_pack = bookmark.get("signal_pack") or build_signal_pack(bookmark)
+        sections = signal_pack_sections(signal_pack)
+        structure = sections["structure"]
+        health_access = sections["health_access"]
         generic_platform = self._is_generic_platform_bookmark(bookmark)
+        homepage_only_source = (
+            str(health_access.get("fetch_status") or "") != "success"
+            and str(structure.get("homepage_fetch_status") or "") == "success"
+            and str(structure.get("homepage_source") or "") == "fetched"
+        )
         hints: list[str] = []
 
         for candidate in dynamic_candidates[:6]:
@@ -707,6 +729,7 @@ class BookmarkClassifier:
         if (
             site_name
             and not generic_platform
+            and not homepage_only_source
             and not self._is_source_like_topic_token(site_name)
         ):
             hints.append(site_name)
@@ -719,6 +742,8 @@ class BookmarkClassifier:
             ("keywords", text_fields["keywords"]),
             ("url_path", text_fields["url_path"]),
         ):
+            if homepage_only_source and source_name == "brand_terms":
+                continue
             if generic_platform and source_name in {"name", "title", "h1"}:
                 value = self._leading_title_segment(value)
             hints.extend(self._cluster_hint_tokens(value))
@@ -811,15 +836,24 @@ class BookmarkClassifier:
         topic_scores: list[dict[str, Any]],
         raw_rule_confidence: float,
         auto_assign_confidence: float,
+        link_health: dict[str, Any] | None = None,
     ) -> bool:
-        if not topic_scores or raw_rule_confidence < auto_assign_confidence:
+        if not topic_scores:
             return False
-        top_score = float(topic_scores[0].get("total", 0.0) or 0.0)
+        top_item = topic_scores[0]
+        top_score = float(top_item.get("total", 0.0) or 0.0)
         minimum_score = max(
             float(self.scoring.get("min_score", 15)),
             float(self.scoring.get("confirm_threshold", 25)),
         )
-        return top_score >= minimum_score and self._is_strong_rule_evidence(topic_scores[0])
+        if raw_rule_confidence >= auto_assign_confidence and top_score >= minimum_score and self._is_strong_rule_evidence(top_item):
+            return True
+        access_pattern = str((link_health or {}).get("access_pattern") or "")
+        has_non_folder_evidence = any(evidence.get("signal") != "folder" for evidence in top_item.get("evidence", []))
+        access_limited_floor = max(float(self.scoring.get("min_score", 15)), float(self.scoring.get("confirm_threshold", 25)) * 0.7)
+        if access_pattern == "access_limited" and has_non_folder_evidence and top_score >= access_limited_floor:
+            return True
+        return False
 
     def _collect_signal_usage(
         self,
@@ -977,8 +1011,11 @@ class BookmarkClassifier:
                 topic_scores,
                 raw_rule_confidence,
                 auto_assign_confidence,
+                link_health,
             )
-            if not review_topic_preserved:
+            if review_topic_preserved:
+                rule_confidence = max(rule_confidence, auto_assign_confidence)
+            else:
                 review_cap = max(0.0, auto_assign_confidence - 0.1)
                 rule_confidence = min(rule_confidence, review_cap)
                 review_penalty_applied = rule_confidence != raw_rule_confidence
@@ -1107,6 +1144,7 @@ class BookmarkClassifier:
             "strong_rule_evidence": bool(topic_scores and self._is_strong_rule_evidence(topic_scores[0])),
             "review_penalty_applied": review_penalty_applied,
             "review_topic_preserved": review_topic_preserved,
+            "review_access_pattern": link_health.get("access_pattern"),
             "llm_assignment_confidence": assignment_confidence,
             "llm_assignment_applied": llm_assignment_applied,
         }

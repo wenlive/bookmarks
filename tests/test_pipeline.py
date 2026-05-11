@@ -131,6 +131,26 @@ def test_signal_pack_uses_structured_page_signals_and_schema_facets():
     assert "identity.canonical_identity" in common_module.flatten_signal_pack(signal_pack, include_empty=True)
 
 
+def test_signal_pack_prefers_richer_metadata_title_over_low_signal_saved_title():
+    bookmark = {
+        "id": "bookmark_doi_like",
+        "name": "3617232.3624857",
+        "url": "https://dl.acm.org/doi/fullHtml/10.1145/3527199.3527264",
+        "domain": "dl.acm.org",
+        "metadata": {
+            "title": "Benchmarking Apache Arrow Flight",
+            "description": "A wire-speed protocol for data transfer",
+            "keywords": "arrow,benchmark,data transfer",
+        },
+    }
+
+    signal_pack = common_module.build_signal_pack(bookmark)
+
+    assert signal_pack["preferred_title"] == "Benchmarking Apache Arrow Flight"
+    assert "3617232.3624857" in signal_pack["title_candidates"]
+    assert "Benchmarking Apache Arrow Flight" in signal_pack["title_candidates"]
+
+
 def test_copy_step_is_noop_for_same_file(tmp_path):
     source = tmp_path / "bookmarks.html"
     source.write_text("demo", encoding="utf-8")
@@ -201,6 +221,47 @@ def test_classifier_ignores_fetch_operational_terms_in_cluster_hints():
     normalized_hints = {hint.lower() for hint in classification["cluster_hints"]}
     assert "success" not in normalized_hints
     assert "fetched" not in normalized_hints
+
+
+def test_classifier_suppresses_homepage_only_source_terms_in_cluster_hints():
+    classifier = classify_module.BookmarkClassifier(classification_options={"confirm_threshold": 90, "title_weight": 50})
+    metadata = build_metadata(
+        "Raft Log Compaction Notes",
+        "Raft storage internals",
+        "raft,storage,consensus",
+        "Raft storage guide",
+        "Distributed systems articles with concrete Raft notes",
+        page_type_hints=["documentation"],
+        site_name="Example Knowledge Base",
+        brand_terms=["Example", "Knowledge", "Base"],
+    )
+    metadata["fetch_status"] = "broken"
+    metadata["status_code"] = 403
+    metadata["link_health"] = {
+        "review_required": True,
+        "trusted_override": False,
+        "reason_label": "访问受限/疑似反爬",
+        "reason_code": "access_denied",
+        "access_pattern": "access_limited",
+    }
+    metadata["site_signals"]["homepage_fetch_status"] = "success"
+    metadata["site_signals"]["homepage_source"] = "fetched"
+    bookmark = {
+        "id": "bookmark_homepage_only_source_terms",
+        "name": "Raft Log Compaction Notes",
+        "url": "https://example.com/private/raft-log-compaction",
+        "domain": "example.com",
+        "original_folder_path": ["分布式系统"],
+        "metadata": metadata,
+    }
+
+    classification = classifier.classify_bookmark(bookmark)
+
+    normalized_hints = {hint.lower() for hint in classification["cluster_hints"]}
+    assert "example" not in normalized_hints
+    assert "knowledge" not in normalized_hints
+    assert "base" not in normalized_hints
+    assert "raft" in normalized_hints
 
 
 def test_cluster_and_generate_html():
@@ -290,6 +351,15 @@ def test_fetch_normalize_metadata_classifies_review_categories():
     )
     assert dns_md["link_health"]["reason_label"] == "DNS/连接失败"
 
+    access_md = fetch_module.normalize_metadata({"fetch_status": "broken", "status_code": 403, "error": "HTTP 403"})
+    assert access_md["link_health"]["reason_label"] == "访问受限/疑似反爬"
+
+    missing_md = fetch_module.normalize_metadata({"fetch_status": "broken", "status_code": 404, "error": "HTTP 404"})
+    assert missing_md["link_health"]["reason_label"] == "链接不存在"
+
+    rate_md = fetch_module.normalize_metadata({"fetch_status": "broken", "status_code": 429, "error": "HTTP 429"})
+    assert rate_md["link_health"]["reason_label"] == "访问受限/频率限制"
+
 
 def test_parse_response_soup_uses_xml_parser_for_xml_content():
     xml = """<?xml version="1.0" encoding="utf-8"?><feed><title>XML Feed</title><entry><title>Item</title></entry></feed>"""
@@ -298,7 +368,7 @@ def test_parse_response_soup_uses_xml_parser_for_xml_content():
     assert soup.find("entry").find("title").get_text(strip=True) == "Item"
 
     broken_md = fetch_module.normalize_metadata({"fetch_status": "broken", "status_code": 404, "error": "HTTP 404"})
-    assert broken_md["link_health"]["reason_label"] == "HTTP 4xx/5xx"
+    assert broken_md["link_health"]["reason_label"] == "链接不存在"
 
 
 def test_trusted_access_policy_skips_review_and_reports_for_selected_domains(tmp_path):
@@ -325,7 +395,7 @@ def test_trusted_access_policy_skips_review_and_reports_for_selected_domains(tmp
     assert trusted["link_health"]["reason_code"] == "trusted_access"
     assert trusted["link_health"]["review_required"] is False
     assert trusted["link_health"]["trusted_override"] is True
-    assert trusted["link_health"]["raw_reason_code"] == "http_error"
+    assert trusted["link_health"]["raw_reason_code"] == "access_denied"
 
     timeout = fetch_module.apply_review_policy(
         {"fetch_status": "timeout", "error": "Request timeout"},
@@ -1046,6 +1116,10 @@ def test_default_config_has_no_rule_file_dependency_or_root_groups(tmp_path):
     assert config.clustering_options["root_groups"] == []
     assert config.clustering_options["display"]["grouping_mode"] == "auto"
     assert config.fetch_options["review_policy"]["trusted_access"]["domain_suffixes"] == []
+    assert config.fetch_options["origin_warmup_retry"] is True
+    assert config.fetch_options["homepage_on_failure"] is True
+    assert config.fetch_options["external_sources"]["enabled"] is False
+    assert config.fetch_options["domain_overrides"] == {}
     assert classify_module.DEFAULT_RULE_BUNDLE["categories"] == {}
 
 
@@ -1545,7 +1619,7 @@ def test_fetch_hotspots_report_export_summarizes_domains_and_pass_deltas(tmp_pat
     assert domains["zhuanlan.zhihu.com"]["review_count"] == 0
     assert domains["zhuanlan.zhihu.com"]["pass_deltas"] == {"review_delta": -1, "success_delta": 1}
     assert domains["blog.csdn.net"]["review_count"] == 2
-    assert {row["reason_code"] for row in domains["blog.csdn.net"]["reason_codes"]} == {"http_error", "other_error"}
+    assert {row["reason_code"] for row in domains["blog.csdn.net"]["reason_codes"]} == {"access_denied", "other_error"}
     assert {row["route"] for row in domains["blog.csdn.net"]["routes"]} == {"direct", "proxy"}
 
 
@@ -1578,6 +1652,19 @@ class FakeSession:
     def get(self, url: str, **kwargs):
         self.requested_urls.append(url)
         return FakeRequestContext(self.pages[url])
+
+
+class QueueSession:
+    def __init__(self, pages: dict[str, list[FakeResponse]]):
+        self.pages = {url: list(items) for url, items in pages.items()}
+        self.requested_urls: list[str] = []
+
+    def get(self, url: str, **kwargs):
+        self.requested_urls.append(url)
+        responses = self.pages[url]
+        if not responses:
+            raise AssertionError(f"no queued response for {url}")
+        return FakeRequestContext(responses.pop(0))
 
 
 def test_fetch_with_site_profile_and_homepage_enrichment():
@@ -1635,6 +1722,150 @@ def test_fetch_with_site_profile_and_homepage_enrichment():
     assert metadata["path_segments"] == ["manual", "api", "ref"]
     assert metadata["site_profile"]["url"]["registrable_domain"] == "example.com"
     assert session.requested_urls == [deep_url, homepage_url]
+
+
+def test_fetch_with_jsonld_only_metadata_extracts_useful_page_fields():
+    url = "https://example.com/article"
+    html = """
+    <html><head>
+      <script type='application/ld+json'>
+      {
+        "@context": "https://schema.org",
+        "@type": "Article",
+        "headline": "Understanding Write-Ahead Logging",
+        "description": "A practical guide to WAL internals.",
+        "keywords": ["wal", "database"],
+        "articleBody": "Write-ahead logging is the durability backbone of many databases."
+      }
+      </script>
+    </head><body><main>Short shell page.</main></body></html>
+    """
+    session = FakeSession({url: FakeResponse(200, url, html)})
+
+    metadata = fetch_module.asyncio.run(
+        fetch_module.fetch_with_aiohttp(
+            session,
+            url,
+            timeout=3,
+            max_retries=0,
+            proxy_options={"enabled": False, "trust_env": False, "http_proxy": None, "https_proxy": None, "all_proxy": None},
+        )
+    )
+
+    assert metadata["title"] == "Understanding Write-Ahead Logging"
+    assert metadata["description"] == "A practical guide to WAL internals."
+    assert metadata["keywords"] == "wal, database"
+    assert metadata["page_signals"]["schema_types"] == ["Article"]
+
+
+def test_fetch_with_origin_warmup_retry_can_recover_access_limited_pages():
+    deep_url = "https://example.com/restricted/path"
+    homepage_url = "https://example.com/"
+    session = QueueSession(
+        {
+            deep_url: [
+                FakeResponse(403, deep_url, "<html><body>denied</body></html>"),
+                FakeResponse(200, deep_url, "<html><head><title>Recovered</title></head><body><main>content</main></body></html>"),
+            ],
+            homepage_url: [
+                FakeResponse(200, homepage_url, "<html><head><title>Example</title><meta property='og:site_name' content='Example Site'></head><body><main>home</main></body></html>"),
+            ],
+        }
+    )
+
+    metadata = fetch_module.asyncio.run(
+        fetch_module.fetch_with_aiohttp(
+            session,
+            deep_url,
+            timeout=3,
+            max_retries=0,
+            proxy_options={"enabled": False, "trust_env": False, "http_proxy": None, "https_proxy": None, "all_proxy": None},
+            fetch_features={"origin_warmup_retry": True, "homepage_on_failure": True},
+        )
+    )
+
+    assert metadata["fetch_status"] == "success"
+    assert metadata["title"] == "Recovered"
+    assert metadata["fetch_context"]["strategy"] == "origin_warmup_retry"
+    assert metadata["fallback_chain"] == ["origin_warmup_homepage", "origin_warmup_retry"]
+    assert session.requested_urls == [deep_url, homepage_url, deep_url]
+
+
+def test_fetch_with_homepage_fallback_preserves_site_context_on_http_failure():
+    deep_url = "https://example.com/private/path"
+    homepage_url = "https://example.com/"
+    session = QueueSession(
+        {
+            deep_url: [FakeResponse(403, deep_url, "<html><body>denied</body></html>")],
+            homepage_url: [
+                FakeResponse(200, homepage_url, "<html lang='en'><head><title>Example Home</title><meta property='og:site_name' content='Example Site'></head><body><main>Developer portal and docs.</main></body></html>"),
+            ],
+        }
+    )
+
+    metadata = fetch_module.asyncio.run(
+        fetch_module.fetch_with_aiohttp(
+            session,
+            deep_url,
+            timeout=3,
+            max_retries=0,
+            proxy_options={"enabled": False, "trust_env": False, "http_proxy": None, "https_proxy": None, "all_proxy": None},
+            fetch_features={"origin_warmup_retry": False, "homepage_on_failure": True},
+        )
+    )
+
+    assert metadata["fetch_status"] == "broken"
+    assert metadata["link_health"]["reason_code"] == "access_denied"
+    assert metadata["site_signals"]["homepage_fetch_status"] == "success"
+    assert metadata["site_signals"]["site_name"] == "Example Site"
+    assert "homepage_site_profile" in metadata["fallback_chain"]
+    assert session.requested_urls == [deep_url, homepage_url]
+
+
+def test_external_metadata_fallback_is_explicitly_opt_in():
+    url = "https://dl.acm.org/doi/fullHtml/10.1145/3527199.3527264"
+    session = FakeSession({url: FakeResponse(403, url, "<html><body>blocked</body></html>")})
+
+    async def fake_resolver(session_obj, target_url, url_signals, metadata_seed, fetch_features, proxy_options):
+        if not (fetch_features.get("external_sources") or {}).get("enabled"):
+            return None
+        return {
+            "provider": "openalex",
+            "matched_identifier": "10.1145/3527199.3527264",
+            "title": "Benchmarking Apache Arrow Flight",
+            "description": "VLDB 2022",
+            "canonical_url": "https://doi.org/10.1145/3527199.3527264",
+        }
+
+    original = fetch_module.resolve_external_metadata
+    fetch_module.resolve_external_metadata = fake_resolver
+    try:
+        disabled = fetch_module.asyncio.run(
+            fetch_module.fetch_with_aiohttp(
+                session,
+                url,
+                timeout=3,
+                max_retries=0,
+                proxy_options={"enabled": False, "trust_env": False, "http_proxy": None, "https_proxy": None, "all_proxy": None},
+                fetch_features={"homepage_on_failure": False, "origin_warmup_retry": False, "external_sources": {"enabled": False}},
+            )
+        )
+        enabled = fetch_module.asyncio.run(
+            fetch_module.fetch_with_aiohttp(
+                session,
+                url,
+                timeout=3,
+                max_retries=0,
+                proxy_options={"enabled": False, "trust_env": False, "http_proxy": None, "https_proxy": None, "all_proxy": None},
+                fetch_features={"homepage_on_failure": False, "origin_warmup_retry": False, "external_sources": {"enabled": True}},
+            )
+        )
+    finally:
+        fetch_module.resolve_external_metadata = original
+
+    assert "external_metadata" not in disabled
+    assert enabled["external_metadata"]["provider"] == "openalex"
+    assert enabled["title"] == "Benchmarking Apache Arrow Flight"
 
 
 def test_fetch_with_domain_override_can_skip_homepage_and_force_direct_route():
@@ -1959,6 +2190,52 @@ def test_clusterer_prefers_classification_resource_type_when_metadata_lacks_it()
     assert "论文" in feature.resource_types
 
 
+def test_clusterer_excludes_homepage_only_source_tokens_from_similarity_features():
+    clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2)
+    bookmark = {
+        "id": "bookmark_homepage_only_similarity",
+        "name": "PostgreSQL WAL Buffer Internals",
+        "url": "https://example.com/private/postgresql-wal-buffer",
+        "domain": "example.com",
+        "original_folder_path": ["数据库"],
+        "metadata": {
+            "title": "PostgreSQL WAL Buffer Internals",
+            "description": "Write-ahead logging buffer management in PostgreSQL",
+            "keywords": "postgresql,wal,buffer",
+            "fetch_status": "broken",
+            "status_code": 403,
+            "page_signals": {
+                "page_type_hints": ["documentation"],
+            },
+            "site_signals": {
+                "site_name": "Example Knowledge Base",
+                "brand_terms": ["Example", "Knowledge", "Base"],
+                "homepage_fetch_status": "success",
+                "homepage_source": "fetched",
+            },
+            "link_health": {
+                "review_required": True,
+                "trusted_override": False,
+                "reason_label": "访问受限/疑似反爬",
+                "reason_code": "access_denied",
+                "access_pattern": "access_limited",
+            },
+        },
+        "classification": {
+            "category": "数据库/PostgreSQL 生态",
+            "resource_type": "文档",
+            "cluster_hints": ["PostgreSQL", "WAL", "Buffer"],
+            "all_scores": {"数据库/PostgreSQL 生态": {"total": 88}},
+        },
+    }
+
+    feature = clusterer.build_feature_set(bookmark)
+
+    assert feature.site_name_tokens == set()
+    assert "postgresql" in feature.cluster_hints
+    assert "wal" in feature.cluster_hints
+
+
 def test_classifier_exports_open_topic_only_bookmarks_for_confirmation(tmp_path):
     classifier = classify_module.BookmarkClassifier(classification_options={"confirm_threshold": 80})
     bookmark = {
@@ -2244,6 +2521,57 @@ def test_classifier_keeps_strong_rule_topic_for_review_required_links(tmp_path):
     assert classification["rule_confidence"] >= 0.55
     assert classification["confidence_components"]["review_topic_preserved"] is True
     assert "待审阅" in classification["quality_signals"]
+
+
+def test_classifier_keeps_title_and_keyword_driven_topic_for_access_limited_links(tmp_path):
+    taxonomy_file = tmp_path / "user_taxonomy.json"
+    taxonomy_file.write_text(
+        json.dumps(
+            {
+                "schema_version": "user_taxonomy/v1",
+                "categories": {
+                    "数据库/PostgreSQL 生态": {
+                        "domains": [],
+                        "keywords": ["postgresql", "wal"],
+                        "title_patterns": ["PostgreSQL"],
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    classifier = classify_module.BookmarkClassifier(user_taxonomy_file=taxonomy_file)
+    bookmark = {
+        "id": "bookmark_review_keep_title_only",
+        "name": "PostgreSQL WAL Deep Dive",
+        "url": "https://example.com/private/postgresql-wal",
+        "domain": "example.com",
+        "original_folder_path": ["数据库"],
+        "metadata": {
+            "title": "PostgreSQL WAL Deep Dive",
+            "description": "postgresql wal durability internals",
+            "keywords": "postgresql,wal,database",
+            "fetch_status": "broken",
+            "status_code": 403,
+            "link_health": {
+                "review_required": True,
+                "trusted_override": False,
+                "reason_label": "访问受限/疑似反爬",
+                "reason_code": "access_denied",
+                "access_pattern": "access_limited",
+            },
+        },
+    }
+
+    classification = classifier.classify_bookmark(bookmark)
+
+    assert classification["category"] == "数据库/PostgreSQL 生态"
+    assert classification["review_required"] is True
+    assert classification["needs_confirmation"] is True
+    assert classification["confirmation_bucket"] == "fetch_blocked"
+    assert classification["rule_confidence"] >= 0.55
+    assert classification["confidence_components"]["review_topic_preserved"] is True
 
 
 def test_classifier_generated_taxonomy_rules_cover_product_specific_families(tmp_path):

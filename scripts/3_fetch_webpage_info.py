@@ -9,8 +9,8 @@ import re
 import warnings
 from collections import Counter
 from pathlib import Path
-from typing import Dict
-from urllib.parse import parse_qsl, urljoin, urlparse
+from typing import Any, Dict
+from urllib.parse import parse_qsl, unquote, urljoin, urlparse
 
 import aiohttp
 from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
@@ -26,6 +26,8 @@ from common import (
 )
 
 TEXT_PREVIEW_LIMIT = 1500
+LOW_SIGNAL_TEXT_LIMIT = 120
+ACCESS_LIMITED_HTTP_STATUSES = {401, 403, 429}
 GENERIC_TITLE_TOKENS = {
     "home", "index", "welcome", "untitled", "首页", "主页", "documentation", "docs", "untitled page"
 }
@@ -46,15 +48,58 @@ REVIEW_LABELS = {
     "timeout": "访问超时",
     "dns_connection": "DNS/连接失败",
     "certificate": "证书异常",
+    "access_denied": "访问受限/疑似反爬",
+    "rate_limited": "访问受限/频率限制",
+    "not_found": "链接不存在",
+    "server_error": "站点服务异常",
     "http_error": "HTTP 4xx/5xx",
     "invalid_url": "无效链接/非HTTP",
     "other_error": "其他抓取异常",
     "trusted_access": "受信任站点/疑似反爬",
 }
+DOI_PATTERN = re.compile(r"10\.\d{4,9}/[-._;()/:A-Z0-9]+", re.IGNORECASE)
 
 
 def clean_text(value: str) -> str:
     return re.sub(r"\s+", " ", value or "").strip()
+
+
+def first_non_empty(*values: Any) -> str:
+    for value in values:
+        cleaned = clean_text(str(value or ""))
+        if cleaned:
+            return cleaned
+    return ""
+
+
+def classify_http_status_reason(status_code: Any) -> str:
+    try:
+        status = int(status_code)
+    except (TypeError, ValueError):
+        return "http_error"
+    if status in {401, 403}:
+        return "access_denied"
+    if status == 429:
+        return "rate_limited"
+    if status in {404, 410}:
+        return "not_found"
+    if 500 <= status <= 599:
+        return "server_error"
+    return "http_error"
+
+
+def access_pattern_for_reason(status: str, reason_code: str) -> str:
+    if status == "success":
+        return "public"
+    if reason_code in {"access_denied", "rate_limited", "trusted_access"}:
+        return "access_limited"
+    if reason_code == "not_found":
+        return "missing"
+    if reason_code == "server_error":
+        return "server_error"
+    if status in {"timeout", "error"}:
+        return "transport_error"
+    return "unknown"
 
 
 def counter_rows(counter: Counter[str], *, key_name: str, limit: int = 10) -> list[dict[str, int | str]]:
@@ -114,7 +159,7 @@ def normalize_metadata(metadata: dict | None) -> dict:
     elif status == "timeout":
         reason_code = "timeout"
     elif status == "broken":
-        reason_code = "http_error"
+        reason_code = classify_http_status_reason(status_code)
     elif status == "skipped":
         reason_code = "invalid_url"
     elif any(token in lowered for token in ("certificate verify failed", "sslcertverificationerror", "hostname mismatch", "certificate has expired")):
@@ -131,6 +176,7 @@ def normalize_metadata(metadata: dict | None) -> dict:
         "status": status,
         "reason_code": reason_code,
         "reason_label": REVIEW_LABELS[reason_code],
+        "access_pattern": access_pattern_for_reason(status, reason_code),
         "review_required": status != "success",
         "status_code": status_code,
         "error": error_text,
@@ -175,14 +221,14 @@ def matching_trusted_rule(domain: str, review_policy: dict | None) -> tuple[dict
 def trusted_access_match(domain: str, metadata: dict, review_policy: dict | None) -> str | None:
     normalized = normalize_metadata(metadata)
     link_health = normalized.get("link_health", {})
-    reason_code = link_health.get("reason_code")
     status_code = link_health.get("status_code")
     rule, matched_domain = matching_trusted_rule(domain, review_policy)
     if not matched_domain:
         return None
 
-    if reason_code == "http_error" and status_code in set(rule.get("http_statuses", [])):
+    if status_code in set(rule.get("http_statuses", [])):
         return matched_domain
+    reason_code = link_health.get("reason_code")
     if reason_code in set(rule.get("allow_reason_codes", [])):
         return matched_domain
     return None
@@ -206,6 +252,7 @@ def apply_review_policy(metadata: dict | None, domain: str, review_policy: dict 
     if matched_domain:
         link_health["reason_code"] = "trusted_access"
         link_health["reason_label"] = REVIEW_LABELS["trusted_access"]
+        link_health["access_pattern"] = "access_limited"
         link_health["review_required"] = False
         link_health["trusted_override"] = True
         link_health["trusted_domain"] = matched_domain
@@ -344,6 +391,20 @@ def get_meta_content(soup: BeautifulSoup, attr_name: str, attr_value: str) -> st
     return clean_text(node.get("content", "")) if node else ""
 
 
+def _as_text_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        parts = [segment.strip() for segment in re.split(r"[,;/|]", value) if segment.strip()]
+        return dedupe_preserve_order(parts or [value])
+    if isinstance(value, list):
+        result: list[str] = []
+        for item in value:
+            result.extend(_as_text_list(item))
+        return dedupe_preserve_order(result)
+    if isinstance(value, dict):
+        return _as_text_list(value.get("name") or value.get("headline") or value.get("title") or value.get("text"))
+    return []
+
+
 def text_preview(node, limit: int = TEXT_PREVIEW_LIMIT) -> str:
     return clean_text(node.get_text(separator=" ", strip=True))[:limit] if node else ""
 
@@ -402,10 +463,100 @@ def should_fetch_homepage(url_signals: dict, page_signals: dict, fetch_homepage_
     if fetch_homepage_override is False:
         return False
     path_depth = len(url_signals.get("path_segments", []))
-    text_length = len(page_signals.get("main_text_preview") or page_signals.get("content_preview") or "")
-    title = (page_signals.get("title") or "").strip().lower()
+    text_length = len(page_best_content_preview(page_signals))
+    title = page_best_title(page_signals).lower()
     generic_title = not title or title in GENERIC_TITLE_TOKENS or len(title) <= 12
-    return text_length < 120 or generic_title or path_depth >= 2
+    return text_length < LOW_SIGNAL_TEXT_LIMIT or generic_title or path_depth >= 2
+
+
+def iter_json_ld_nodes(payload: Any) -> list[dict[str, Any]]:
+    nodes: list[dict[str, Any]] = []
+    if isinstance(payload, dict):
+        nodes.append(payload)
+        for value in payload.values():
+            nodes.extend(iter_json_ld_nodes(value))
+    elif isinstance(payload, list):
+        for item in payload:
+            nodes.extend(iter_json_ld_nodes(item))
+    return nodes
+
+
+def extract_json_ld_signals(soup: BeautifulSoup) -> dict[str, Any]:
+    signals = {
+        "schema_types": [],
+        "titles": [],
+        "descriptions": [],
+        "keywords": [],
+        "authors": [],
+        "published_at": [],
+        "languages": [],
+        "article_bodies": [],
+    }
+    for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
+        raw = clean_text(script.string or script.get_text(" ", strip=True))
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        for node in iter_json_ld_nodes(payload):
+            node_type = node.get("@type")
+            if isinstance(node_type, list):
+                signals["schema_types"].extend(str(value) for value in node_type if value)
+            elif node_type:
+                signals["schema_types"].append(str(node_type))
+            signals["titles"].extend(_as_text_list(node.get("headline") or node.get("name") or node.get("title")))
+            signals["descriptions"].extend(_as_text_list(node.get("description") or node.get("abstract")))
+            signals["keywords"].extend(_as_text_list(node.get("keywords")))
+            signals["authors"].extend(_as_text_list(node.get("author") or node.get("creator")))
+            signals["published_at"].extend(_as_text_list(node.get("datePublished") or node.get("dateCreated")))
+            signals["languages"].extend(_as_text_list(node.get("inLanguage")))
+            article_body = clean_text(str(node.get("articleBody") or node.get("text") or ""))
+            if article_body:
+                signals["article_bodies"].append(article_body[:TEXT_PREVIEW_LIMIT])
+    for key in signals:
+        signals[key] = dedupe_preserve_order(signals[key])
+    return signals
+
+
+def page_best_title(page_signals: dict[str, Any]) -> str:
+    return first_non_empty(
+        page_signals.get("og:title"),
+        page_signals.get("twitter:title"),
+        page_signals.get("jsonld_title"),
+        page_signals.get("title"),
+        page_signals.get("h1"),
+    )
+
+
+def page_best_description(page_signals: dict[str, Any]) -> str:
+    return first_non_empty(
+        page_signals.get("og:description"),
+        page_signals.get("twitter:description"),
+        page_signals.get("jsonld_description"),
+        page_signals.get("description"),
+    )
+
+
+def page_best_keywords(page_signals: dict[str, Any]) -> str:
+    return first_non_empty(page_signals.get("keywords"), page_signals.get("jsonld_keywords"))
+
+
+def page_best_content_preview(page_signals: dict[str, Any]) -> str:
+    return first_non_empty(
+        page_signals.get("main_text_preview"),
+        page_signals.get("jsonld_article_body"),
+        page_signals.get("content_preview"),
+    )
+
+
+def page_signal_is_low_value(page_signals: dict[str, Any]) -> bool:
+    title = page_best_title(page_signals).lower()
+    description = page_best_description(page_signals)
+    preview = page_best_content_preview(page_signals)
+    generic_title = not title or title in GENERIC_TITLE_TOKENS or len(title) <= 12
+    return generic_title and not description and len(preview) < LOW_SIGNAL_TEXT_LIMIT
 
 
 def extract_page_signals(soup: BeautifulSoup, resolved_url: str) -> dict:
@@ -426,23 +577,7 @@ def extract_page_signals(soup: BeautifulSoup, resolved_url: str) -> dict:
             match = re.search(r"(?:language|lang)-([A-Za-z0-9_+#.-]+)", str(class_name))
             if match:
                 code_languages.append(match.group(1))
-    json_ld_types: list[str] = []
-    for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
-        raw = clean_text(script.string or script.get_text(" ", strip=True))
-        if not raw:
-            continue
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        items = payload if isinstance(payload, list) else [payload]
-        for item in items:
-            if isinstance(item, dict):
-                node_type = item.get("@type")
-                if isinstance(node_type, list):
-                    json_ld_types.extend(str(value) for value in node_type)
-                elif node_type:
-                    json_ld_types.append(str(node_type))
+    json_ld_signals = extract_json_ld_signals(soup)
 
     lang = ""
     html_node = soup.find("html")
@@ -462,10 +597,16 @@ def extract_page_signals(soup: BeautifulSoup, resolved_url: str) -> dict:
         "og:site_name": get_meta_content(soup, "property", "og:site_name"),
         "twitter:title": get_meta_content(soup, "name", "twitter:title"),
         "twitter:description": get_meta_content(soup, "name", "twitter:description"),
+        "jsonld_title": first_non_empty(*(json_ld_signals.get("titles") or [])),
+        "jsonld_description": first_non_empty(*(json_ld_signals.get("descriptions") or [])),
+        "jsonld_keywords": ", ".join(json_ld_signals.get("keywords") or []),
+        "jsonld_authors": json_ld_signals.get("authors") or [],
+        "published_at": first_non_empty(*(json_ld_signals.get("published_at") or [])),
         "headings": headings,
         "nav_text": nav_text,
         "main_text_preview": text_preview(main_node),
-        "schema_types": dedupe_preserve_order(json_ld_types),
+        "jsonld_article_body": first_non_empty(*(json_ld_signals.get("article_bodies") or [])),
+        "schema_types": json_ld_signals.get("schema_types") or [],
         "generator": generator,
         "code_languages": dedupe_preserve_order(code_languages),
     }
@@ -476,6 +617,9 @@ def extract_page_signals(soup: BeautifulSoup, resolved_url: str) -> dict:
         page_signals["og:description"],
         page_signals["twitter:title"],
         page_signals["twitter:description"],
+        page_signals["jsonld_title"],
+        page_signals["jsonld_description"],
+        page_signals["jsonld_article_body"],
         page_signals["main_text_preview"],
         *page_signals["headings"]["h1"],
         *page_signals["headings"]["h2"],
@@ -495,6 +639,8 @@ async def fetch_url(
     proxy_options: dict,
     *,
     domain_override_name: str | None = None,
+    request_headers: dict[str, str] | None = None,
+    strategy_name: str = "primary_request",
 ) -> Dict:
     proxy = resolve_proxy_for_url(url, proxy_options)
     for attempt in range(max_retries + 1):
@@ -504,6 +650,7 @@ async def fetch_url(
                 timeout=aiohttp.ClientTimeout(total=timeout),
                 allow_redirects=True,
                 proxy=proxy,
+                headers=request_headers,
             ) as response:
                 status = response.status
                 html = await response.text(errors="ignore")
@@ -518,6 +665,7 @@ async def fetch_url(
                     "fetch_context": {
                         **build_fetch_context(proxy_options, attempts=attempt + 1, resolved_proxy=proxy),
                         "domain_override": domain_override_name or "",
+                        "strategy": strategy_name,
                     },
                 }
         except asyncio.TimeoutError:
@@ -527,6 +675,7 @@ async def fetch_url(
                 "fetch_context": {
                     **build_fetch_context(proxy_options, attempts=attempt + 1, resolved_proxy=proxy),
                     "domain_override": domain_override_name or "",
+                    "strategy": strategy_name,
                 },
             }
         except aiohttp.ClientError as exc:
@@ -536,6 +685,7 @@ async def fetch_url(
                 "fetch_context": {
                     **build_fetch_context(proxy_options, attempts=attempt + 1, resolved_proxy=proxy),
                     "domain_override": domain_override_name or "",
+                    "strategy": strategy_name,
                 },
             }
         except Exception as exc:  # noqa: BLE001
@@ -545,6 +695,7 @@ async def fetch_url(
                 "fetch_context": {
                     **build_fetch_context(proxy_options, attempts=attempt + 1, resolved_proxy=proxy),
                     "domain_override": domain_override_name or "",
+                    "strategy": strategy_name,
                 },
             }
 
@@ -556,8 +707,197 @@ async def fetch_url(
         "fetch_context": {
             **build_fetch_context(proxy_options, attempts=max_retries + 1, resolved_proxy=proxy),
             "domain_override": domain_override_name or "",
+            "strategy": strategy_name,
         },
     }
+
+
+def build_homepage_url(url_or_response: str) -> str:
+    parsed = urlparse(url_or_response)
+    return f"{parsed.scheme}://{parsed.netloc}/"
+
+
+def base_site_signals(homepage_url: str, page_signals: dict[str, Any] | None = None) -> dict[str, Any]:
+    page_signals = page_signals or {}
+    return {
+        "homepage_url": homepage_url,
+        "site_name": page_signals.get("og:site_name") or "",
+        "site_type_candidates": list(page_signals.get("page_type_hints", [])),
+        "content_language": page_signals.get("lang") or "",
+        "brand_terms": [],
+        "homepage_fetch_status": "skipped",
+        "homepage_source": "not_needed",
+    }
+
+
+async def enrich_site_from_homepage(
+    session: aiohttp.ClientSession,
+    homepage_url: str,
+    *,
+    effective_timeout: int,
+    effective_retries: int,
+    effective_proxy: dict,
+    domain_override_name: str | None,
+    page_signals: dict[str, Any] | None = None,
+    target_url_signals: dict[str, Any] | None = None,
+    fetch_homepage_override: bool | None = None,
+    reason: str = "homepage_enrichment",
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    page_signals = page_signals or {}
+    site_signals = base_site_signals(homepage_url, page_signals)
+    homepage_page_signals: dict[str, Any] = {}
+    if not homepage_url:
+        return site_signals, homepage_page_signals
+    if page_signals and not should_fetch_homepage(target_url_signals or extract_url_signals(homepage_url), page_signals, fetch_homepage_override):
+        return site_signals, homepage_page_signals
+
+    homepage_fetch = await fetch_url(
+        session,
+        homepage_url,
+        effective_timeout,
+        effective_retries,
+        effective_proxy,
+        domain_override_name=domain_override_name,
+        strategy_name=reason,
+    )
+    if "response" in homepage_fetch:
+        homepage_response: SimpleResponse = homepage_fetch["response"]
+        if homepage_response.status < 400:
+            homepage_soup = parse_response_soup(homepage_response.html, homepage_response.headers)
+            homepage_page_signals = extract_page_signals(homepage_soup, homepage_response.url)
+            site_signals["homepage_fetch_status"] = "success"
+            site_signals["homepage_source"] = "fetched"
+            site_signals["site_type_candidates"] = infer_site_types(
+                page_signals.get("page_type_hints", []),
+                homepage_page_signals.get("page_type_hints", []),
+                homepage_url,
+                homepage_page_signals.get("og:site_name", ""),
+            )
+            if not site_signals["content_language"]:
+                site_signals["content_language"] = homepage_page_signals.get("lang", "")
+        else:
+            site_signals["homepage_fetch_status"] = "broken"
+            site_signals["homepage_source"] = "failed"
+    else:
+        site_signals["homepage_fetch_status"] = homepage_fetch.get("fetch_status", "error")
+        site_signals["homepage_source"] = "failed"
+
+    site_signals["site_name"] = extract_site_name(page_signals, homepage_page_signals, extract_url_signals(homepage_url).get("registrable_domain", ""))
+    site_signals["brand_terms"] = build_brand_terms(
+        site_signals["site_name"],
+        extract_url_signals(homepage_url).get("registrable_domain", ""),
+        page_best_title(page_signals) or page_best_title(homepage_page_signals),
+    )
+    return site_signals, homepage_page_signals
+
+
+def should_attempt_origin_warmup_retry(status_code: int, url_signals: dict[str, Any], fetch_features: dict[str, Any], override_rule: dict[str, Any]) -> bool:
+    if status_code not in ACCESS_LIMITED_HTTP_STATUSES:
+        return False
+    if not url_signals.get("path_segments"):
+        return False
+    if override_rule.get("origin_warmup_retry") is False:
+        return False
+    return bool(fetch_features.get("origin_warmup_retry", True))
+
+
+def extract_doi_candidates(*values: Any) -> list[str]:
+    seen: set[str] = set()
+    candidates: list[str] = []
+    for value in values:
+        text = unquote(str(value or ""))
+        for match in DOI_PATTERN.findall(text):
+            cleaned = match.rstrip(").,;]")
+            normalized = cleaned.lower()
+            if normalized not in seen:
+                seen.add(normalized)
+                candidates.append(cleaned)
+    return candidates
+
+
+async def fetch_openalex_metadata(
+    session: aiohttp.ClientSession,
+    doi: str,
+    *,
+    timeout: int,
+    proxy_options: dict,
+) -> dict[str, Any] | None:
+    query_url = "https://api.openalex.org/works"
+    proxy = resolve_proxy_for_url(query_url, proxy_options)
+    try:
+        async with session.get(
+            query_url,
+            params={
+                "filter": f"doi:https://doi.org/{doi}",
+                "per-page": 1,
+                "select": "display_name,doi,publication_year,type,primary_location",
+            },
+            timeout=aiohttp.ClientTimeout(total=timeout),
+            proxy=proxy,
+            headers={"Accept": "application/json"},
+        ) as response:
+            if response.status >= 400:
+                return None
+            payload = await response.json(content_type=None)
+    except Exception:  # noqa: BLE001
+        return None
+    results = payload.get("results") if isinstance(payload, dict) else None
+    if not isinstance(results, list) or not results:
+        return None
+    row = results[0] if isinstance(results[0], dict) else {}
+    primary_location = row.get("primary_location") if isinstance(row.get("primary_location"), dict) else {}
+    source = primary_location.get("source") if isinstance(primary_location.get("source"), dict) else {}
+    return {
+        "provider": "openalex",
+        "matched_identifier": doi,
+        "title": clean_text(row.get("display_name", "")),
+        "description": clean_text(f"{source.get('display_name', '')} {row.get('publication_year', '')}"),
+        "canonical_url": clean_text(row.get("doi", "")),
+        "resource_type": clean_text(row.get("type", "")),
+    }
+
+
+async def resolve_external_metadata(
+    session: aiohttp.ClientSession,
+    url: str,
+    url_signals: dict[str, Any],
+    metadata_seed: dict[str, Any],
+    fetch_features: dict[str, Any],
+    proxy_options: dict,
+) -> dict[str, Any] | None:
+    external_options = fetch_features.get("external_sources") or {}
+    if not external_options.get("enabled"):
+        return None
+    openalex_options = external_options.get("openalex") or {}
+    if not openalex_options.get("enabled", True):
+        return None
+    doi_candidates = extract_doi_candidates(
+        url,
+        metadata_seed.get("canonical_url"),
+        metadata_seed.get("title"),
+        metadata_seed.get("description"),
+        "/".join(url_signals.get("path_segments", [])),
+    )
+    if not doi_candidates:
+        return None
+    timeout = int(openalex_options.get("timeout", 6) or 6)
+    return await fetch_openalex_metadata(session, doi_candidates[0], timeout=timeout, proxy_options=proxy_options)
+
+
+def merge_external_metadata(metadata: dict[str, Any], external_metadata: dict[str, Any] | None) -> dict[str, Any]:
+    if not external_metadata:
+        return metadata
+    merged = dict(metadata)
+    merged["title"] = first_non_empty(merged.get("title"), external_metadata.get("title"))
+    merged["description"] = first_non_empty(merged.get("description"), external_metadata.get("description"))
+    merged["canonical_url"] = first_non_empty(merged.get("canonical_url"), external_metadata.get("canonical_url"))
+    merged["external_metadata"] = external_metadata
+    providers = list(merged.get("metadata_sources") or [])
+    provider_name = clean_text(external_metadata.get("provider"))
+    if provider_name and provider_name not in providers:
+        providers.append(provider_name)
+    merged["metadata_sources"] = providers
+    return merged
 
 
 async def fetch_with_aiohttp(
@@ -567,7 +907,9 @@ async def fetch_with_aiohttp(
     max_retries: int,
     proxy_options: dict,
     domain_overrides: dict | None = None,
+    fetch_features: dict | None = None,
 ) -> Dict:
+    fetch_features = fetch_features or {}
     url_signals = extract_url_signals(url)
     domain_override_name, override_rule = match_domain_override(url, domain_overrides)
     timeout_override = override_rule.get("timeout")
@@ -576,6 +918,7 @@ async def fetch_with_aiohttp(
     effective_retries = int(max_retries if retries_override is None else retries_override)
     effective_proxy = effective_proxy_options(proxy_options, override_rule)
     fetch_homepage_override = override_rule.get("fetch_homepage")
+    homepage_on_failure = bool(fetch_features.get("homepage_on_failure", True))
 
     page_fetch = await fetch_url(
         session,
@@ -589,71 +932,147 @@ async def fetch_with_aiohttp(
         **build_fetch_context(effective_proxy, attempts=effective_retries + 1),
         "domain_override": domain_override_name or "",
     }
-    if "response" not in page_fetch:
-        return normalize_metadata({**url_signals, **page_fetch, "fetch_context": fetch_context, "metadata_schema_version": "site_profile/v1"})
+    fallback_chain: list[str] = []
+    prefetched_site_signals: dict[str, Any] = {}
+    prefetched_homepage_page_signals: dict[str, Any] = {}
+    homepage_url = build_homepage_url(url)
 
-    page_response: SimpleResponse = page_fetch["response"]
-    if page_response.status >= 400:
-        return {
+    if "response" not in page_fetch:
+        if homepage_on_failure and homepage_url != url:
+            prefetched_site_signals, prefetched_homepage_page_signals = await enrich_site_from_homepage(
+                session,
+                homepage_url,
+                effective_timeout=effective_timeout,
+                effective_retries=effective_retries,
+                effective_proxy=effective_proxy,
+                domain_override_name=domain_override_name,
+                target_url_signals=url_signals,
+                fetch_homepage_override=True,
+                reason="homepage_fallback_on_transport_error",
+            )
+            if prefetched_site_signals.get("homepage_fetch_status") == "success":
+                fallback_chain.append("homepage_site_profile")
+        metadata_seed = {
             **url_signals,
-            "fetch_status": "broken",
-            "status_code": page_response.status,
-            "response_headers": page_response.headers,
-            "error": f"HTTP {page_response.status}",
+            **page_fetch,
             "fetch_context": fetch_context,
+            "site_signals": prefetched_site_signals,
+            "site_profile": {
+                "schema_version": "site_profile/v1",
+                "url": url_signals,
+                "site": prefetched_site_signals,
+            } if prefetched_site_signals else {},
+            "metadata_sources": ["bookmark"],
+            "fallback_chain": fallback_chain,
             "metadata_schema_version": "site_profile/v1",
         }
+        external_metadata = await resolve_external_metadata(session, url, url_signals, metadata_seed, fetch_features, effective_proxy)
+        return normalize_metadata(merge_external_metadata(metadata_seed, external_metadata))
+
+    page_response: SimpleResponse = page_fetch["response"]
+    homepage_url = build_homepage_url(page_response.url)
+    if page_response.status >= 400:
+        if should_attempt_origin_warmup_retry(page_response.status, url_signals, fetch_features, override_rule) and homepage_url != page_response.url:
+            prefetched_site_signals, prefetched_homepage_page_signals = await enrich_site_from_homepage(
+                session,
+                homepage_url,
+                effective_timeout=effective_timeout,
+                effective_retries=effective_retries,
+                effective_proxy=effective_proxy,
+                domain_override_name=domain_override_name,
+                target_url_signals=url_signals,
+                fetch_homepage_override=True,
+                reason="origin_warmup_homepage",
+            )
+            if prefetched_site_signals.get("homepage_fetch_status") == "success":
+                fallback_chain.append("origin_warmup_homepage")
+                retry_fetch = await fetch_url(
+                    session,
+                    url,
+                    effective_timeout,
+                    effective_retries,
+                    effective_proxy,
+                    domain_override_name=domain_override_name,
+                    request_headers={"Referer": homepage_url},
+                    strategy_name="origin_warmup_retry",
+                )
+                if "response" in retry_fetch:
+                    page_response = retry_fetch["response"]
+                    fetch_context = retry_fetch.get("fetch_context") or fetch_context
+                    if page_response.status < 400:
+                        fallback_chain.append("origin_warmup_retry")
+                else:
+                    fetch_context = retry_fetch.get("fetch_context") or fetch_context
+        if page_response.status >= 400:
+            if homepage_on_failure and not prefetched_site_signals and homepage_url != page_response.url:
+                prefetched_site_signals, prefetched_homepage_page_signals = await enrich_site_from_homepage(
+                    session,
+                    homepage_url,
+                    effective_timeout=effective_timeout,
+                    effective_retries=effective_retries,
+                    effective_proxy=effective_proxy,
+                    domain_override_name=domain_override_name,
+                    target_url_signals=url_signals,
+                    fetch_homepage_override=True,
+                    reason="homepage_fallback_on_http_error",
+                )
+                if prefetched_site_signals.get("homepage_fetch_status") == "success":
+                    fallback_chain.append("homepage_site_profile")
+            metadata_seed = {
+                **url_signals,
+                "fetch_status": "broken",
+                "status_code": page_response.status,
+                "response_headers": page_response.headers,
+                "error": f"HTTP {page_response.status}",
+                "fetch_context": fetch_context,
+                "site_signals": prefetched_site_signals,
+                "site_profile": {
+                    "schema_version": "site_profile/v1",
+                    "url": url_signals,
+                    "site": prefetched_site_signals,
+                } if prefetched_site_signals else {},
+                "metadata_sources": ["bookmark"],
+                "fallback_chain": fallback_chain,
+                "metadata_schema_version": "site_profile/v1",
+            }
+            external_metadata = await resolve_external_metadata(session, url, url_signals, metadata_seed, fetch_features, effective_proxy)
+            return normalize_metadata(merge_external_metadata(metadata_seed, external_metadata))
 
     soup = parse_response_soup(page_response.html, page_response.headers)
     page_signals = extract_page_signals(soup, page_response.url)
-    homepage_url = f"{urlparse(page_response.url).scheme}://{urlparse(page_response.url).netloc}/"
-    site_signals = {
-        "homepage_url": homepage_url,
-        "site_name": page_signals.get("og:site_name") or "",
-        "site_type_candidates": page_signals.get("page_type_hints", []),
-        "content_language": page_signals.get("lang") or "",
-        "brand_terms": [],
-        "homepage_fetch_status": "skipped",
-        "homepage_source": "not_needed",
-    }
-
-    homepage_page_signals: dict = {}
+    site_signals = base_site_signals(homepage_url, page_signals)
+    homepage_page_signals: dict[str, Any] = {}
+    if prefetched_site_signals:
+        site_signals.update({key: value for key, value in prefetched_site_signals.items() if value not in ("", [], None)})
+        homepage_page_signals = prefetched_homepage_page_signals
     if homepage_url != page_response.url and should_fetch_homepage(url_signals, page_signals, fetch_homepage_override):
-        homepage_fetch = await fetch_url(
-            session,
-            homepage_url,
-            effective_timeout,
-            effective_retries,
-            effective_proxy,
-            domain_override_name=domain_override_name,
-        )
-        if "response" in homepage_fetch:
-            homepage_response: SimpleResponse = homepage_fetch["response"]
-            if homepage_response.status < 400:
-                homepage_soup = parse_response_soup(homepage_response.html, homepage_response.headers)
-                homepage_page_signals = extract_page_signals(homepage_soup, homepage_response.url)
-                site_signals["homepage_fetch_status"] = "success"
-                site_signals["homepage_source"] = "fetched"
-                site_signals["site_type_candidates"] = infer_site_types(
-                    page_signals.get("page_type_hints", []),
-                    homepage_page_signals.get("page_type_hints", []),
-                    homepage_url,
-                    homepage_page_signals.get("og:site_name", ""),
-                )
-                if not site_signals["content_language"]:
-                    site_signals["content_language"] = homepage_page_signals.get("lang", "")
-            else:
-                site_signals["homepage_fetch_status"] = "broken"
-                site_signals["homepage_source"] = "failed"
+        if not homepage_page_signals:
+            site_signals, homepage_page_signals = await enrich_site_from_homepage(
+                session,
+                homepage_url,
+                effective_timeout=effective_timeout,
+                effective_retries=effective_retries,
+                effective_proxy=effective_proxy,
+                domain_override_name=domain_override_name,
+                page_signals=page_signals,
+                target_url_signals=url_signals,
+                fetch_homepage_override=fetch_homepage_override,
+                reason="homepage_enrichment",
+            )
         else:
-            site_signals["homepage_fetch_status"] = homepage_fetch.get("fetch_status", "error")
-            site_signals["homepage_source"] = "failed"
-
+            site_signals["site_type_candidates"] = infer_site_types(
+                page_signals.get("page_type_hints", []),
+                homepage_page_signals.get("page_type_hints", []),
+                homepage_url,
+                homepage_page_signals.get("og:site_name", ""),
+            )
+            if not site_signals.get("content_language"):
+                site_signals["content_language"] = homepage_page_signals.get("lang", "")
     site_signals["site_name"] = extract_site_name(page_signals, homepage_page_signals, url_signals.get("registrable_domain", ""))
     site_signals["brand_terms"] = build_brand_terms(
         site_signals["site_name"],
         url_signals.get("registrable_domain", ""),
-        page_signals.get("title", "") or homepage_page_signals.get("title", ""),
+        page_best_title(page_signals) or page_best_title(homepage_page_signals),
     )
     site_profile = {
         "schema_version": "site_profile/v1",
@@ -661,12 +1080,13 @@ async def fetch_with_aiohttp(
         "page": page_signals,
         "site": site_signals,
     }
-    return normalize_metadata({
-        "title": page_signals["title"],
-        "description": page_signals["description"],
-        "keywords": page_signals["keywords"],
+    metadata_payload = {
+        "title": page_best_title(page_signals),
+        "description": page_best_description(page_signals),
+        "keywords": page_best_keywords(page_signals),
         "h1": page_signals["h1"],
-        "content_preview": page_signals["content_preview"],
+        "content_preview": page_best_content_preview(page_signals),
+        "canonical_url": first_non_empty(page_signals.get("canonical_url")),
         **url_signals,
         "fetch_status": "success",
         "status_code": page_response.status,
@@ -675,8 +1095,14 @@ async def fetch_with_aiohttp(
         "page_signals": page_signals,
         "site_signals": site_signals,
         "site_profile": site_profile,
+        "metadata_sources": ["page"],
+        "fallback_chain": fallback_chain,
         "metadata_schema_version": "site_profile/v1",
-    })
+    }
+    if page_signal_is_low_value(page_signals):
+        external_metadata = await resolve_external_metadata(session, url, url_signals, metadata_payload, fetch_features, effective_proxy)
+        metadata_payload = merge_external_metadata(metadata_payload, external_metadata)
+    return normalize_metadata(metadata_payload)
 
 
 async def process_batch(
@@ -686,12 +1112,13 @@ async def process_batch(
     max_retries: int,
     proxy_options: dict,
     domain_overrides: dict | None = None,
+    fetch_features: dict | None = None,
     review_policy: dict | None = None,
 ) -> list:
     tasks = []
     for bookmark in bookmarks:
         if bookmark["url"].startswith(("http://", "https://")):
-            tasks.append(fetch_with_aiohttp(session, bookmark["url"], timeout, max_retries, proxy_options, domain_overrides))
+            tasks.append(fetch_with_aiohttp(session, bookmark["url"], timeout, max_retries, proxy_options, domain_overrides, fetch_features))
         else:
             tasks.append(asyncio.sleep(0, result=normalize_metadata({"fetch_status": "skipped", "error": "Invalid URL", "metadata_schema_version": "site_profile/v1"})))
 
@@ -717,6 +1144,7 @@ def export_broken_links_report(bookmarks: list, report_file: Path, review_policy
                     "url": bookmark.get("url"),
                     "status_code": metadata.get("status_code"),
                     "error": metadata.get("error"),
+                    "reason_code": metadata.get("link_health", {}).get("reason_code"),
                     "review_category": metadata.get("link_health", {}).get("reason_label"),
                 }
             )
@@ -743,6 +1171,8 @@ def export_review_report(bookmarks: list, report_file: Path, review_policy: dict
                 "error": metadata.get("error"),
                 "review_category": link_health.get("reason_label"),
                 "reason_code": link_health.get("reason_code"),
+                "access_pattern": link_health.get("access_pattern"),
+                "metadata_sources": metadata.get("metadata_sources", []),
             }
         )
     ensure_parent(report_file)
@@ -847,7 +1277,7 @@ async def fetch_webpage_info_async(input_file: Path, output_file: Path, options:
         "Cache-Control": "no-cache",
         "Pragma": "no-cache",
     }
-    connector = aiohttp.TCPConnector(limit=options["concurrent_limit"])
+    connector = aiohttp.TCPConnector(limit=options["concurrent_limit"], limit_per_host=max(int(options.get("per_host_limit", 0) or 0), 0))
     existing_bookmarks = []
     if output_file.exists():
         try:
@@ -878,25 +1308,21 @@ async def fetch_webpage_info_async(input_file: Path, output_file: Path, options:
             batch = [bookmark for _, bookmark in batch_entries]
             logger.info("抓取进度: %s/%s", reused_count + index, total)
             process_batch_signature = inspect.signature(process_batch)
+            batch_kwargs: dict[str, Any] = {}
             if "domain_overrides" in process_batch_signature.parameters:
-                batch_results = await process_batch(
-                    batch,
-                    session,
-                    options["timeout"],
-                    options["max_retries"],
-                    options["proxy"],
-                    domain_overrides=options.get("domain_overrides"),
-                    review_policy=review_policy,
-                )
-            else:
-                batch_results = await process_batch(
-                    batch,
-                    session,
-                    options["timeout"],
-                    options["max_retries"],
-                    options["proxy"],
-                    review_policy,
-                )
+                batch_kwargs["domain_overrides"] = options.get("domain_overrides")
+            if "fetch_features" in process_batch_signature.parameters:
+                batch_kwargs["fetch_features"] = options
+            if "review_policy" in process_batch_signature.parameters:
+                batch_kwargs["review_policy"] = review_policy
+            batch_results = await process_batch(
+                batch,
+                session,
+                options["timeout"],
+                options["max_retries"],
+                options["proxy"],
+                **batch_kwargs,
+            )
             for (bookmark_index, _), enriched in zip(batch_entries, batch_results):
                 ordered_results[bookmark_index] = enriched
             await asyncio.sleep(options["delay"])

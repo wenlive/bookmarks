@@ -557,6 +557,11 @@ class BookmarkClusterer:
         domain = str(identity.get("domain") or bookmark.get("domain") or urlparse(bookmark.get("url", "")).netloc).lower()
         registered_domain = self._registered_domain(domain) if domain else ""
         generic_platform = self._is_generic_platform(registered_domain)
+        homepage_only_source = (
+            str(health_access.get("fetch_status") or "") != "success"
+            and str(structure.get("homepage_fetch_status") or "") == "success"
+            and str(structure.get("homepage_source") or "") == "fetched"
+        )
         path_tokens, page_type_hints = self._tokenize_path(bookmark.get("url", ""))
         preferred_title = str(content.get("preferred_title", "") or "")
         title_candidates = [" ".join(content.get("title_candidates", []) or [])]
@@ -575,7 +580,7 @@ class BookmarkClusterer:
         ])))
         if generic_platform:
             title_tokens.difference_update(GENERIC_PLATFORM_TOKENS)
-        if generic_platform:
+        if generic_platform or homepage_only_source:
             site_name_tokens = set()
         else:
             site_name_tokens = set(

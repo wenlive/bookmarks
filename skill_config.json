@@ -28,14 +28,24 @@
   },
   "fetch_options": {
     "concurrent_limit": 15,
+    "per_host_limit": 4,
     "timeout": 15,
     "delay": 0.8,
     "batch_size": 50,
     "max_retries": 2,
     "force_refetch": false,
+    "origin_warmup_retry": true,
+    "homepage_on_failure": true,
     "cache_file": "data/bookmarks_with_info.json",
     "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
     "domain_overrides": {},
+    "external_sources": {
+      "enabled": false,
+      "openalex": {
+        "enabled": true,
+        "timeout": 6
+      }
+    },
     "proxy": {
       "enabled": false,
       "trust_env": false,

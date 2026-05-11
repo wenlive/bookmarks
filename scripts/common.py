@@ -434,6 +434,23 @@ def _looks_like_platform_slogan(value: str) -> bool:
     )
 
 
+def _saved_title_is_low_signal(value: str) -> bool:
+    text = _clean_signal_text(value)
+    if not text:
+        return False
+    collapsed = re.sub(r"[^\w\u4e00-\u9fff]+", "", text)
+    if not collapsed:
+        return True
+    if _looks_like_platform_slogan(text):
+        return True
+    if _looks_like_generated_identifier(normalize_topic_token(text)):
+        return True
+    digit_count = sum(ch.isdigit() for ch in collapsed)
+    if len(collapsed) >= 6 and digit_count / len(collapsed) >= 0.6:
+        return True
+    return False
+
+
 def is_noisy_topic_token(value: str, blocked_tokens: set[str] | None = None) -> bool:
     token = normalize_topic_token(value)
     if not token:
@@ -605,12 +622,20 @@ def build_signal_pack(bookmark: dict[str, Any]) -> dict[str, Any]:
     page, site, page_profile, site_profile = _metadata_profile_blocks(metadata)
 
     saved_name = _clean_signal_text(bookmark.get("name"))
+    saved_title_low_signal = _saved_title_is_low_signal(saved_name)
     og_title = _first_non_empty(page.get("og:title"), page_profile.get("og:title"))
     twitter_title = _first_non_empty(page.get("twitter:title"), page_profile.get("twitter:title"))
+    jsonld_title = _first_non_empty(page.get("jsonld_title"), page_profile.get("jsonld_title"))
     h1 = _first_non_empty(metadata.get("h1"), page.get("h1"), page_profile.get("h1"))
     html_title = _first_non_empty(metadata.get("title"), page.get("title"), page_profile.get("title"))
-    preferred_title = _first_non_empty(saved_name, og_title, twitter_title, h1, html_title)
-    title_candidates = _as_text_list([saved_name, og_title, twitter_title, h1, html_title])
+    preferred_title = _first_non_empty(
+        og_title,
+        twitter_title,
+        jsonld_title,
+        h1,
+        html_title,
+    ) if saved_title_low_signal else _first_non_empty(saved_name, og_title, twitter_title, jsonld_title, h1, html_title)
+    title_candidates = _as_text_list([saved_name, og_title, twitter_title, jsonld_title, h1, html_title])
 
     user_description = _first_non_empty(
         bookmark.get("description"),
@@ -620,10 +645,11 @@ def build_signal_pack(bookmark: dict[str, Any]) -> dict[str, Any]:
     )
     og_description = _first_non_empty(page.get("og:description"), page_profile.get("og:description"))
     twitter_description = _first_non_empty(page.get("twitter:description"), page_profile.get("twitter:description"))
+    jsonld_description = _first_non_empty(page.get("jsonld_description"), page_profile.get("jsonld_description"))
     meta_description = _first_non_empty(metadata.get("description"), page.get("description"), page_profile.get("description"))
     main_text = _first_non_empty(page.get("main_text_preview"), page_profile.get("main_text_preview"), metadata.get("content_preview"), page.get("content_preview"), page_profile.get("content_preview"))
-    preferred_description = _first_non_empty(user_description, og_description, twitter_description, meta_description, main_text)
-    keywords_text = _clean_signal_text(metadata.get("keywords") or page.get("keywords") or page_profile.get("keywords"))
+    preferred_description = _first_non_empty(user_description, og_description, twitter_description, jsonld_description, meta_description, main_text)
+    keywords_text = _clean_signal_text(metadata.get("keywords") or page.get("keywords") or page.get("jsonld_keywords") or page_profile.get("keywords") or page_profile.get("jsonld_keywords"))
 
     page_type_hints = _as_text_list(page.get("page_type_hints") or page_profile.get("page_type_hints"))
     site_type_candidates = _as_text_list(site.get("site_type_candidates") or site_profile.get("site_type_candidates"))
@@ -701,7 +727,7 @@ def build_signal_pack(bookmark: dict[str, Any]) -> dict[str, Any]:
         "semantic_text": " ".join(part for part in semantic_parts if part),
         "main_text": main_text,
         "title_candidates": title_candidates,
-        "description_candidates": _as_text_list([user_description, og_description, twitter_description, meta_description, main_text]),
+        "description_candidates": _as_text_list([user_description, og_description, twitter_description, jsonld_description, meta_description, main_text]),
         "keywords_text": keywords_text,
         "language": language,
         "code_languages": code_languages,
@@ -826,11 +852,14 @@ class PipelineConfig:
         trusted_access.update(review_policy.get("trusted_access", {}))
         self.fetch_options = {
             "concurrent_limit": raw.get("fetch_options", {}).get("concurrent_limit", 15),
+            "per_host_limit": raw.get("fetch_options", {}).get("per_host_limit", 4),
             "timeout": raw.get("fetch_options", {}).get("timeout", 15),
             "delay": raw.get("fetch_options", {}).get("delay", 0.8),
             "batch_size": raw.get("fetch_options", {}).get("batch_size", 50),
             "max_retries": raw.get("fetch_options", {}).get("max_retries", 2),
             "force_refetch": raw.get("fetch_options", {}).get("force_refetch", False),
+            "origin_warmup_retry": raw.get("fetch_options", {}).get("origin_warmup_retry", True),
+            "homepage_on_failure": raw.get("fetch_options", {}).get("homepage_on_failure", True),
             "user_agent": raw.get("fetch_options", {}).get(
                 "user_agent",
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -847,6 +876,16 @@ class PipelineConfig:
                 "trusted_access": trusted_access,
             },
             "domain_overrides": raw.get("fetch_options", {}).get("domain_overrides", {}),
+            "external_sources": raw.get("fetch_options", {}).get(
+                "external_sources",
+                {
+                    "enabled": False,
+                    "openalex": {
+                        "enabled": True,
+                        "timeout": 6,
+                    },
+                },
+            ),
         }
         self.classification_options = raw.get("classification_options", {})
         self.clustering_options = dict(raw.get("clustering_options", {}))
