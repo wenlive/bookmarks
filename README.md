@@ -15,14 +15,15 @@ description: 中文优先的项目入口文档。说明这个 Chrome 书签整�
 copy -> parse -> fetch -> classify -> cluster -> generate html
 ```
 
-输出一个可重新导入 Chrome 的整理后 HTML，以及一组用来解释不确定性、抓取失败和规则缺口的报告。
+输出一个可重新导入 Chrome 的整理后 HTML，以及一组用来解释不确定性、内容补充状态和规则缺口的报告。
 
 项目目标不是“尽量少留 `待整理`”，而是：
 
 - 尽量减少错误归类
 - 不让旧 Chrome 文件夹主导主题判断
 - 不把 GitHub、知乎、CSDN 这类通用平台误当成主题
-- 保留抓取失败和不确定项，并明确告诉你为什么需要复核
+- 即使取不到网页正文，也尽量用保存标题、URL、同簇证据和 generated taxonomy 完成整理
+- 把网络诊断留在报告中，只把真正需要用户处理的链接问题放进 `待审阅`
 
 ## 适合谁
 
@@ -64,7 +65,7 @@ output/organized_bookmarks.html
 
 - 原始 Chrome 文件夹路径只是弱上下文，不是强主题证据
 - `github.com`、`zhihu.com`、`csdn.net`、`medium.com` 等通用平台默认不是 topic domain
-- 输出 HTML 的书签数可能大于输入，因为 `待审阅` 是镜像层，不是重复 bug
+- 输出 HTML 的书签数可能大于输入，因为 `待审阅` 会镜像疑似失效、地址异常或证书异常的链接；普通超时、DNS、403 和服务端错误不会进入该目录
 - 正常运行会自动消费已有的 `data/generated/user_taxonomy.json` 和 `data/generated/bookmark_taxonomy_assignments.json`
 - 项目默认不会内嵌或自动调用任何在线模型 API
 
@@ -110,6 +111,7 @@ output/organized_bookmarks.html
 - `classified_output/v2`
 - `clustering_output/v2`
 - `signal_pack/v2`
+- `quality_report/v2`
 
 ## 两个 LLM 介入点
 

@@ -31,6 +31,12 @@ export all_proxy=socks5://127.0.0.1:7897
 ./organize.sh data/bookmarks.html skill_config.json --force-refetch
 ```
 
+大型书签集快速基线：
+
+```bash
+./organize.sh data/bookmarks.html skill_config.json --timeout 6 --max-retries 0 --delay 0
+```
+
 ## 分步执行
 
 ```bash
@@ -111,4 +117,10 @@ python3 -m py_compile scripts/common.py scripts/1_copy_bookmark.py scripts/2_par
 python3 -c "import json; json.load(open('skill_config.json'))"
 pytest -q
 git diff --check
+```
+
+质量报告快速检查：
+
+```bash
+python3 -c "import json; d=json.load(open('output/reports/quality_report.json')); print(d['assessment']); print(d['display_conservation']); print(d['content_unavailable_outcome'])"
 ```

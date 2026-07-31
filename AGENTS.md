@@ -56,9 +56,10 @@ Keep these unless the user explicitly asks for a different product behavior:
 
 - original Chrome folder path is context, not strong topic evidence
 - low-confidence normal assignments should downgrade to `待整理`
-- discovered but unsupported clusters should route to `发现主题`
+- coherent unsupported clusters with enough independent support should route to `发现主题`; small or source-host-only groups should stay in `待整理`
 - broken or suspicious links should be preserved
-- review-required links should be mirrored to `待审阅`
+- fetch/enrichment failure is internal diagnostic state, not a user-facing folder concept
+- only links with actionable validity problems should be mirrored to `待审阅`
 - generic platforms should not become topic evidence by domain alone
 - reports should explain why the output still needs review or rule work
 - generated taxonomy and runtime state stay ignored; tracked source remains generic
@@ -90,6 +91,7 @@ Agent rules:
 - do produce strict schema-valid response JSON
 - do apply that response through `scripts/apply_taxonomy_response.py`
 - do not embed direct vendor model API calls into the default local pipeline
+- do not add a third model step merely because fetching failed; bootstrap/follow-up already receive identity and unresolved-cluster evidence
 
 Required input pairs:
 
@@ -109,6 +111,8 @@ When real fetching matters:
 - preserve proxy-first plus direct-retry behavior unless the user asks otherwise
 - surface proxy env guidance when network restrictions are likely
 - keep fetch provenance and failure semantics visible
+- treat fetched content as optional enrichment; title, URL identity, generated taxonomy, and cross-bookmark evidence must remain usable without it
+- do not expose timeout, DNS, access-denied, or server-error buckets as Chrome folder names
 
 Canonical proxy example:
 
@@ -143,10 +147,14 @@ csdn.net
 jianshu.com
 docs.qq.com
 qq.com
+tencent.com
 google.com
 notion.so
 youtube.com
 bilibili.com
+feishu.cn
+feishu.com
+larksuite.com
 ```
 
 Agent rules:
@@ -172,6 +180,7 @@ Responsibilities:
 - record fetch provenance in `fetch_context`
 - support proxy-first fetch plus direct retry
 - emit `broken_links.json` and `review_queue.json`
+- distinguish internal `review_required` diagnostics from user-facing `user_action_required`
 
 When changing fetch:
 
@@ -203,6 +212,7 @@ When changing classification:
 - prefer content and metadata over folder names
 - keep fetch operational fields out of topic scoring
 - verify `low_confidence_normal_category_count == 0`
+- downgrade cross-root score ties and homepage aggregate-content-only matches unless an explicit generated assignment resolves them
 
 ### Clustering
 
@@ -227,6 +237,29 @@ When changing clustering:
 - penalize weak cross-topic merges
 - stop source/platform labels from dominating cluster names
 - add or update quality metrics when changing routing behavior
+
+## Validation-First Iteration Loop
+
+For behavior-sensitive work, establish a baseline before changing rules, then repeat:
+
+1. run classify, cluster, and HTML generation against the same input and generated state
+2. inspect `quality_report.json` before optimizing coverage
+3. inspect representative bookmarks from low-purity, discovery, and tidy clusters
+4. change one reusable mechanism or generated taxonomy response
+5. rerun and compare report semantics and HTML browse structure
+
+Required `quality_report/v2` checks:
+
+- `guardrails.status == "pass"`
+- `display_missing_bookmark_count == 0`
+- `display_duplicate_bookmark_count == 0`
+- `low_confidence_normal_category_count == 0`
+- `generic_platform_domain_suggestion_count == 0`
+- `fetch_blocked_discovery_cluster_count == 0`
+- no source/platform labels in discovered topic roots
+- no oversized display leaf created by the change
+
+Track `content_unavailable_normal_category_share` to evaluate graceful degradation. Do not improve it by promoting ambiguous bookmarks; normal cluster purity and semantic samples take precedence.
 
 ## Safe And Risky Changes
 
@@ -263,6 +296,7 @@ For behavior-sensitive work:
 - prefer an isolated runtime under `/tmp`
 - inspect `review_queue.json`, `fetch_hotspots.json`, `needs_confirmation.json`, `rule_suggestions.json`, `quality_report.json`, `signal_audit.json`
 - compare report semantics, not just visible HTML
+- rerun deterministic downstream steps twice when clustering or display grouping changes
 
 ## Commit Readiness
 
@@ -273,3 +307,4 @@ A change is ready when:
 - generated state is not mistakenly committed
 - no tracked default logic has been bent toward one user's current dataset
 - output quality does not regress on folder-only classification, low-confidence normal classification, generic-platform suggestions, or fetch-blocked discovery routing
+- display conservation is exact: every parsed bookmark appears once in the main hierarchy; `待审阅` is an intentional actionable-link mirror only

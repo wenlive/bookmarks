@@ -18,6 +18,7 @@ FETCH_OUTPUT_SCHEMA_VERSION = "fetch_output/v2"
 CLASSIFIED_OUTPUT_SCHEMA_VERSION = "classified_output/v2"
 CLUSTERING_OUTPUT_SCHEMA_VERSION = "clustering_output/v2"
 SIGNAL_AUDIT_SCHEMA_VERSION = "signal_audit/v1"
+QUALITY_REPORT_SCHEMA_VERSION = "quality_report/v2"
 SIGNAL_PACK_SCHEMA_VERSION = "signal_pack/v2"
 TAXONOMY_BOOTSTRAP_CLUSTERS_SCHEMA_VERSION = "taxonomy_bootstrap_clusters/v1"
 TAXONOMY_FOLLOWUP_CANDIDATES_SCHEMA_VERSION = "taxonomy_followup_candidates/v1"
@@ -25,6 +26,12 @@ USER_TAXONOMY_RESPONSE_SCHEMA_VERSION = "user_taxonomy_response/v1"
 USER_TAXONOMY_SCHEMA_VERSION = "user_taxonomy/v1"
 BOOKMARK_TAXONOMY_ASSIGNMENTS_SCHEMA_VERSION = "bookmark_taxonomy_assignments/v1"
 FETCH_HOTSPOTS_SCHEMA_VERSION = "fetch_hotspots/v1"
+USER_ACTION_REASON_LABELS = {
+    "not_found": "可能已失效",
+    "invalid_url": "地址格式异常",
+    "certificate": "安全证书异常",
+    "http_error": "访问状态异常",
+}
 DEFAULT_TRUSTED_ACCESS_POLICY = {
     "enabled": False,
     "domain_suffixes": [],
@@ -44,8 +51,11 @@ DEFAULT_DISPLAY_OPTIONS = {
     "tidy_root_name": "待整理",
     "max_direct_normal_roots": 10,
     "standalone_discovery_min_count": 3,
-    "tidy_semantic_min_support": 2,
+    "tidy_semantic_min_support": 3,
     "tidy_root_fallback_min_count": 3,
+    "tidy_resource_group_min_count": 5,
+    "tidy_resource_group_max_count": 40,
+    "oversized_leaf_threshold": 40,
 }
 DEFAULT_GENERIC_PLATFORM_DOMAINS = {
     "github.com",
@@ -63,11 +73,15 @@ DEFAULT_GENERIC_PLATFORM_DOMAINS = {
     "cnblogs.com",
     "docs.qq.com",
     "qq.com",
+    "tencent.com",
     "docs.google.com",
     "google.com",
     "notion.so",
     "youtube.com",
     "bilibili.com",
+    "feishu.cn",
+    "feishu.com",
+    "larksuite.com",
 }
 GENERIC_PLATFORM_TOKENS = {
     "github",
@@ -84,6 +98,7 @@ GENERIC_PLATFORM_TOKENS = {
     "51cto",
     "jianshu",
     "qq",
+    "tencent",
     "google",
     "notion",
     "youtube",
@@ -114,6 +129,8 @@ GENERIC_PLATFORM_TOKENS = {
     "details",
     "article",
     "weixin",
+    "feishu",
+    "larksuite",
 }
 NOISY_TOPIC_TOKENS = {
     re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", value.lower())
@@ -173,6 +190,7 @@ NOISY_TOPIC_TOKENS = {
         "breadcrumblist",
         "indexhtml",
         "githubio",
+        "飞书",
         "官方文档",
         "官方网站",
         "文档中心",
@@ -261,11 +279,20 @@ SOURCE_LIKE_TOPIC_TOKENS = {
         "performance",
         "developers",
         "developer",
+        "segmentfault",
+        "v2ex",
+        "amazonaws",
+        "personal",
+        "service",
+        "services",
+        "just",
         "news",
         "center",
         "官方网站",
         "在线文档",
         "腾讯文档",
+        "腾讯云",
+        "云启未来",
         "文档中心",
         "官方文档",
         "开发者",
@@ -677,11 +704,16 @@ def build_signal_pack(bookmark: dict[str, Any]) -> dict[str, Any]:
     generator = _first_non_empty(page.get("generator"), page_profile.get("generator"))
 
     language = _first_non_empty(page.get("lang"), page_profile.get("lang"), site.get("content_language"), site_profile.get("content_language"))
-    link_health = metadata.get("link_health", {}) if isinstance(metadata.get("link_health"), dict) else {}
+    link_health = dict(metadata.get("link_health", {})) if isinstance(metadata.get("link_health"), dict) else {}
+    reason_code = str(link_health.get("reason_code") or "")
+    if "user_action_required" not in link_health:
+        link_health["user_action_required"] = reason_code in USER_ACTION_REASON_LABELS
+    if link_health.get("user_action_required") and not link_health.get("user_action_label"):
+        link_health["user_action_label"] = USER_ACTION_REASON_LABELS.get(reason_code, "链接需要复查")
     quality_facets = []
     if metadata.get("fetch_status") == "success":
         quality_facets.append("抓取成功")
-    if link_health.get("review_required"):
+    if link_health.get("user_action_required"):
         quality_facets.append("待审阅")
     if link_health.get("trusted_override"):
         quality_facets.append("受信任访问")
@@ -754,6 +786,7 @@ def build_signal_pack(bookmark: dict[str, Any]) -> dict[str, Any]:
         "fetch_context": metadata.get("fetch_context", {}) if isinstance(metadata.get("fetch_context"), dict) else {},
         "trusted_override": bool(link_health.get("trusted_override")),
         "review_required": bool(link_health.get("review_required", False)),
+        "user_action_required": bool(link_health.get("user_action_required", False)),
         "status_code": metadata.get("status_code"),
     }
     context_time = {

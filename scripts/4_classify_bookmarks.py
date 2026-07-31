@@ -60,6 +60,7 @@ DEFAULT_SCORING = {
     "confirm_threshold": 25,
     "auto_assign_confidence": 0.55,
     "confirm_confidence": 0.65,
+    "cross_root_ambiguity_margin": 2.0,
 }
 
 
@@ -363,9 +364,12 @@ class BookmarkClassifier:
 
     def calculate_keyword_score(self, bookmark: dict, category_rules: dict) -> int:
         text_fields = self._collect_text_fields(bookmark)
+        signal_pack = bookmark.get("signal_pack") or build_signal_pack(bookmark)
+        sections = signal_pack_sections(signal_pack)
+        is_homepage = not sections["identity"].get("path_segments")
         text = " ".join([
-            text_fields["title"],
-            text_fields["description"],
+            str(sections["content"].get("preferred_title") or "") if is_homepage else text_fields["title"],
+            "" if is_homepage else text_fields["description"],
             text_fields["keywords"],
             text_fields["site_name"],
             text_fields["brand_terms"],
@@ -376,8 +380,20 @@ class BookmarkClassifier:
 
     def calculate_title_score(self, bookmark: dict, category_rules: dict) -> int:
         signal_pack = bookmark.get("signal_pack") or build_signal_pack(bookmark)
+        sections = signal_pack_sections(signal_pack)
         text_fields = self._collect_text_fields(bookmark)
-        candidates = list(signal_pack.get("title_candidates") or []) + [text_fields["title"], text_fields["h1"], text_fields["site_name"]]
+        if sections["identity"].get("path_segments"):
+            candidates = list(signal_pack.get("title_candidates") or []) + [
+                text_fields["title"],
+                text_fields["h1"],
+                text_fields["site_name"],
+            ]
+        else:
+            candidates = [
+                str(sections["identity"].get("saved_title") or ""),
+                str(sections["content"].get("preferred_title") or ""),
+                text_fields["site_name"],
+            ]
         for pattern in category_rules.get("title_patterns", []):
             if any(re.search(pattern, candidate, re.IGNORECASE) for candidate in candidates if candidate):
                 return 80
@@ -1004,6 +1020,7 @@ class BookmarkClassifier:
         rule_confidence = raw_rule_confidence
         auto_assign_confidence = float(self.scoring.get("auto_assign_confidence", 0.55))
         review_required = bool(link_health.get("review_required"))
+        user_action_required = bool(link_health.get("user_action_required"))
         review_penalty_applied = False
         review_topic_preserved = False
         if review_required and not link_health.get("trusted_override"):
@@ -1019,7 +1036,8 @@ class BookmarkClassifier:
                 review_cap = max(0.0, auto_assign_confidence - 0.1)
                 rule_confidence = min(rule_confidence, review_cap)
                 review_penalty_applied = rule_confidence != raw_rule_confidence
-            quality_signals = sorted(set(quality_signals + ["待审阅"]))
+            if user_action_required:
+                quality_signals = sorted(set(quality_signals + ["待审阅"]))
         llm_assignment = self._lookup_assignment(bookmark)
         llm_assignment_applied = False
         assignment_confidence = 0.0
@@ -1057,6 +1075,33 @@ class BookmarkClassifier:
                         "support": 1.0,
                     }
                 ]
+        cross_root_ambiguous = False
+        cross_root_ambiguity_margin = float(self.scoring.get("cross_root_ambiguity_margin", 2.0))
+        if not llm_assignment_applied and len(topic_scores) > 1:
+            top_item, runner_up_item = topic_scores[:2]
+            top_root = self._category_root(top_item["topic"])
+            runner_up_root = self._category_root(runner_up_item["topic"])
+            score_margin = float(top_item["total"]) - float(runner_up_item["total"])
+            runner_up_has_topic_evidence = any(
+                evidence.get("signal") != "folder" for evidence in runner_up_item.get("evidence", [])
+            )
+            cross_root_ambiguous = (
+                top_root != runner_up_root
+                and score_margin <= cross_root_ambiguity_margin
+                and float(runner_up_item["total"]) >= float(self.scoring.get("min_score", 15))
+                and runner_up_has_topic_evidence
+            )
+            if cross_root_ambiguous:
+                rule_confidence = min(rule_confidence, max(0.0, auto_assign_confidence - 0.01))
+        homepage_aggregate_only = False
+        if not llm_assignment_applied and topic_scores and not signal_sections["identity"].get("path_segments"):
+            top_evidence_signals = {
+                str(evidence.get("signal") or "")
+                for evidence in topic_scores[0].get("evidence", [])
+            }
+            homepage_aggregate_only = not bool(top_evidence_signals & {"domain", "title"})
+            if homepage_aggregate_only:
+                rule_confidence = min(rule_confidence, max(0.0, auto_assign_confidence - 0.01))
         if rule_confidence < auto_assign_confidence:
             fallback_category = self.default_category
             primary_topics = []
@@ -1078,6 +1123,10 @@ class BookmarkClassifier:
             needs_confirmation_reasons.append("score_below_min")
         if rule_confidence < auto_assign_confidence:
             needs_confirmation_reasons.append("low_rule_confidence")
+        if cross_root_ambiguous:
+            needs_confirmation_reasons.append("cross_root_score_ambiguity")
+        if homepage_aggregate_only:
+            needs_confirmation_reasons.append("homepage_aggregate_only")
         if dynamic_candidates and not llm_assignment_applied:
             needs_confirmation_reasons.append("open_topic_candidates_present")
         if fetch_status and fetch_status != "success" and fallback_category == self.default_category:
@@ -1137,6 +1186,9 @@ class BookmarkClassifier:
             "top_score": round(top_score, 2),
             "runner_up_score": round(runner_up_score, 2),
             "score_margin": round(max(top_score - runner_up_score, 0.0), 2),
+            "cross_root_ambiguity_margin": cross_root_ambiguity_margin,
+            "cross_root_ambiguous": cross_root_ambiguous,
+            "homepage_aggregate_only": homepage_aggregate_only,
             "confirm_threshold": float(self.scoring.get("confirm_threshold", 25)),
             "auto_assign_confidence": auto_assign_confidence,
             "raw_rule_confidence": raw_rule_confidence,
@@ -1179,6 +1231,7 @@ class BookmarkClassifier:
                     "health_access": {
                         "fetch_status": signal_sections["health_access"].get("fetch_status"),
                         "review_required": signal_sections["health_access"].get("review_required"),
+                        "user_action_required": signal_sections["health_access"].get("user_action_required"),
                     },
                     "context_time": {
                         "time_bucket": signal_sections["context_time"].get("time_bucket", {}),
@@ -1216,6 +1269,7 @@ class BookmarkClassifier:
             "needs_confirmation_reasons": needs_confirmation_reasons,
             "confirmation_bucket": confirmation_bucket,
             "review_required": review_required,
+            "user_action_required": user_action_required,
             "review_category": review_category,
             "review_reason_code": review_reason_code,
             "all_scores": {item["topic"]: {k: v for k, v in item.items() if k != "topic"} for item in topic_scores},

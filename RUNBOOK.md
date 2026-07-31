@@ -77,6 +77,16 @@ export all_proxy=socks5://127.0.0.1:7897
 ./organize.sh data/bookmarks.html skill_config.json --force-refetch --use-proxy --trust-env --direct-retry-after-proxy
 ```
 
+### 快速建立网络基线
+
+对大型书签集首次试跑时，可以降低单页等待和重试次数：
+
+```bash
+./organize.sh data/bookmarks.html skill_config.json --timeout 6 --max-retries 0 --delay 0
+```
+
+该模式适合尽快获得第一份分类与聚类基线，不应被当成最终链接健康结论。抓取阶段会在每个 batch 后原子写入 checkpoint；中断后重跑相同命令会复用已成功结果，并继续重试 unresolved 条目。
+
 ## 清理与状态复用
 
 ### 只清抓取缓存
@@ -237,8 +247,9 @@ python3 scripts/6_generate_html.py --config skill_config.json
 
 ### `review_queue.json`
 
-- 看所有 review-required 的抓取异常
-- 它是“待审阅”的数据基础，不等于真的坏链
+- 看所有内部 review-required 的内容补充异常
+- 它用于网络诊断，不再等同于 HTML 中的 `待审阅`
+- HTML 只镜像 `user_action_required`：疑似失效、无效地址、证书异常等用户可处理问题
 
 ### `fetch_hotspots.json`
 
@@ -267,6 +278,10 @@ python3 scripts/6_generate_html.py --config skill_config.json
   - `low_confidence_normal_category_count == 0`
   - `generic_platform_domain_suggestion_count == 0`
   - `fetch_blocked_discovery_cluster_count == 0`
+  - `display_missing_bookmark_count == 0`
+  - `display_duplicate_bookmark_count == 0`
+- 看无正文降级质量：`content_unavailable_normal_category_share`
+- 看目录可浏览性：`display_max_depth`、`display_max_leaf_bookmarks`
 
 ### `signal_audit.json`
 
@@ -275,7 +290,7 @@ python3 scripts/6_generate_html.py --config skill_config.json
 
 ## 如何理解结果层级
 
-- `待审阅`：抓取层面需要复核，链接并不一定已失效
+- `待审阅`：链接本身可能需要用户处理；普通抓取失败不会出现在这里
 - `待整理`：证据不足，不应该冒险塞进正常主题
 - `发现主题`：有一定聚合意义，但当前 taxonomy 还不支持稳定落位
 
@@ -285,7 +300,7 @@ python3 scripts/6_generate_html.py --config skill_config.json
 
 ## 常见排障
 
-### 抓取失败过多
+### 内容补充失败过多
 
 先区分问题来源：
 
@@ -298,14 +313,15 @@ python3 scripts/6_generate_html.py --config skill_config.json
 1. 先看 `review_queue.json`
 2. 再看 `fetch_hotspots.json`
 3. 如需真实抓取，优先尝试代理优先模式
-4. 不要先用 taxonomy 规则掩盖抓取问题
+4. 分类仍可依赖保存标题、URL 和 generated taxonomy；不要为了覆盖率放宽正常分类阈值
+5. 用 `content_unavailable_outcome` 判断无正文时的实际产出，不要用 HTML 中的 `待审阅` 数量推断抓取质量
 
 ### `待整理` 太多
 
 优先判断是哪一种：
 
 - `rule_gap`：说明需要 generated taxonomy 或 follow-up
-- `fetch_blocked`：说明抓取信息不足
+- `fetch_blocked`：内部表示可用内容信号不足；最终 HTML 显示为更中性的“信息不足”
 - `low_confidence`：说明现有证据不足以稳定归类
 
 先看：

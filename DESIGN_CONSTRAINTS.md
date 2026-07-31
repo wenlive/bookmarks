@@ -80,6 +80,16 @@ export all_proxy=socks5://127.0.0.1:7897
 - 优先把可复用的提取逻辑放进 `signal_pack/v2`
 - 不因为“这是小众主题”就强行退回 tracked hardcode 或忽略用户内部强信号
 
+## 4.1 抓取是可选增强，不是用户输出的前置条件
+
+必须保持：
+
+- 保存标题、完整 URL、路径/仓库名、同簇证据和 generated assignments 在无正文时仍可工作
+- timeout、DNS、403、限流和服务端异常保留在内部报告，不直接生成浏览目录
+- `待审阅` 只镜像真正需要用户动作的链接有效性问题
+- 抓取失败不能删除书签，也不能把有明确 identity evidence 的主题强制降级
+- 长页面首页的聚合正文不能冒充该首页本身的单一主题
+
 ## 5. 输出首先是浏览产品，而不是纯聚类产物
 
 最终 HTML 不是只给指标看的，它是要被人重新导入浏览器继续使用的。
@@ -88,6 +98,7 @@ export all_proxy=socks5://127.0.0.1:7897
 
 - 顶层结构适合浏览和重找
 - 正常主题、`待整理`、`发现主题`、`待审阅` 之间保持明确分离
+- 主层级必须逐条守恒；每个解析后书签恰好出现一次，审阅镜像另计
 - 不为了 purity 把正常主题压成少数巨型根目录
 - 也不为了细粒度把大量微小主题炸成顶层噪音
 - cluster label 优先是人能理解的主题名，而不是平台名、栏目名或站点 slogan
@@ -111,10 +122,14 @@ csdn.net
 jianshu.com
 docs.qq.com
 qq.com
+tencent.com
 google.com
 notion.so
 youtube.com
 bilibili.com
+feishu.cn
+feishu.com
+larksuite.com
 ```
 
 必须保持：
@@ -139,6 +154,7 @@ bilibili.com
 - 是否把 direct/proxy 语义写模糊了
 - 是否牺牲浏览层可用性换取表面覆盖率
 - 是否让 `folder_only`、`low_confidence_normal`、`generic_platform_domain_suggestion` 或 `fetch_blocked_discovery` 指标回退
+- 是否造成显示层缺失、重复、过深或超大叶目录
 
 ## Preferred Patterns
 

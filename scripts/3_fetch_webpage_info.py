@@ -18,6 +18,7 @@ from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 from common import (
     FETCH_OUTPUT_SCHEMA_VERSION,
     FETCH_HOTSPOTS_SCHEMA_VERSION,
+    USER_ACTION_REASON_LABELS,
     build_parser,
     configure_logging,
     ensure_parent,
@@ -178,6 +179,8 @@ def normalize_metadata(metadata: dict | None) -> dict:
         "reason_label": REVIEW_LABELS[reason_code],
         "access_pattern": access_pattern_for_reason(status, reason_code),
         "review_required": status != "success",
+        "user_action_required": reason_code in USER_ACTION_REASON_LABELS,
+        "user_action_label": USER_ACTION_REASON_LABELS.get(reason_code, ""),
         "status_code": status_code,
         "error": error_text,
     }
@@ -254,6 +257,8 @@ def apply_review_policy(metadata: dict | None, domain: str, review_policy: dict 
         link_health["reason_label"] = REVIEW_LABELS["trusted_access"]
         link_health["access_pattern"] = "access_limited"
         link_health["review_required"] = False
+        link_health["user_action_required"] = False
+        link_health["user_action_label"] = ""
         link_health["trusted_override"] = True
         link_health["trusted_domain"] = matched_domain
 
@@ -302,6 +307,48 @@ def merge_with_metadata(bookmark: dict, metadata: dict, review_policy: dict | No
     enriched = bookmark.copy()
     enriched["metadata"] = apply_review_policy(metadata, bookmark.get("domain", ""), review_policy)
     return enriched
+
+
+def write_fetch_checkpoint(
+    output_file: Path,
+    bookmarks: list[dict],
+    ordered_results: list[dict | None],
+    *,
+    processed_count: int,
+    review_policy: dict | None = None,
+) -> None:
+    """Persist completed batches so a long fetch can resume after interruption."""
+    checkpoint_bookmarks = []
+    for bookmark, result in zip(bookmarks, ordered_results):
+        if result is not None:
+            checkpoint_bookmarks.append(result)
+            continue
+        checkpoint_bookmarks.append(
+            merge_with_metadata(
+                bookmark,
+                {
+                    "fetch_status": "error",
+                    "error": "Fetch pending at last checkpoint",
+                    "checkpoint_pending": True,
+                    "metadata_schema_version": "site_profile/v1",
+                },
+                review_policy,
+            )
+        )
+
+    payload = {
+        "schema_version": FETCH_OUTPUT_SCHEMA_VERSION,
+        "bookmarks": checkpoint_bookmarks,
+        "checkpoint": {
+            "complete": False,
+            "processed_count": processed_count,
+            "total_bookmarks": len(bookmarks),
+        },
+    }
+    ensure_parent(output_file)
+    temporary_file = output_file.with_name(f".{output_file.name}.tmp")
+    temporary_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary_file.replace(output_file)
 
 
 def fetch_route_configured(proxy_options: dict | None) -> bool:
@@ -1325,6 +1372,13 @@ async def fetch_webpage_info_async(input_file: Path, output_file: Path, options:
             )
             for (bookmark_index, _), enriched in zip(batch_entries, batch_results):
                 ordered_results[bookmark_index] = enriched
+            write_fetch_checkpoint(
+                output_file,
+                bookmarks,
+                ordered_results,
+                processed_count=reused_count + index + len(batch_entries),
+                review_policy=review_policy,
+            )
             await asyncio.sleep(options["delay"])
 
     final_results: list[dict] = []
@@ -1457,6 +1511,7 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=None)
     parser.add_argument("--delay", type=float, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--max-retries", type=int, default=None, help="单个 URL 的最大重试次数")
     parser.add_argument("--use-proxy", action="store_true", help="显式启用代理")
     parser.add_argument("--trust-env", action="store_true", help="从环境变量读取代理")
     parser.add_argument("--http-proxy", default=None, help="HTTP 代理地址")
@@ -1493,6 +1548,8 @@ def main() -> int:
         options["delay"] = args.delay
     if args.batch_size is not None:
         options["batch_size"] = args.batch_size
+    if args.max_retries is not None:
+        options["max_retries"] = max(args.max_retries, 0)
     if args.force_refetch:
         options["force_refetch"] = True
 

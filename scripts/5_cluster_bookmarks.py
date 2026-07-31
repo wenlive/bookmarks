@@ -17,6 +17,7 @@ from common import (
     CLUSTERING_OUTPUT_SCHEMA_VERSION,
     DEFAULT_GENERIC_PLATFORM_DOMAINS,
     GENERIC_PLATFORM_TOKENS,
+    QUALITY_REPORT_SCHEMA_VERSION,
     SIGNAL_AUDIT_SCHEMA_VERSION,
     SOURCE_LIKE_TOPIC_TOKENS,
     build_parser,
@@ -121,14 +122,14 @@ DISPLAY_TOKEN_OVERRIDES = {
     "github": "GitHub",
 }
 TIDY_BUCKET_DISPLAY_NAMES = {
-    "fetch_blocked": "抓取受阻",
-    "rule_gap": "规则缺口",
-    "low_confidence": "低置信度",
+    "fetch_blocked": "信息不足",
+    "rule_gap": "候选主题",
+    "low_confidence": "主题不明确",
 }
 TIDY_BUCKET_DISPLAY_ORDER = {
-    "抓取受阻": 0,
-    "规则缺口": 1,
-    "低置信度": 2,
+    "信息不足": 0,
+    "候选主题": 1,
+    "主题不明确": 2,
 }
 
 
@@ -1200,6 +1201,18 @@ class BookmarkClusterer:
         return [token for token, _ in ranked_tokens[:limit]]
 
     @staticmethod
+    def _stable_most_common(counter: Counter[str], limit: int) -> List[tuple[str, int]]:
+        """Rank equal-frequency explanation signals independently of input order."""
+        return sorted(
+            counter.items(),
+            key=lambda item: (
+                -item[1],
+                normalize_topic_token(str(item[0])),
+                str(item[0]).casefold(),
+            ),
+        )[:limit]
+
+    @staticmethod
     def _clone_hierarchy_payload(payload: Dict) -> Dict:
         cloned: Dict[str, Any] = {}
         for key, value in payload.items():
@@ -1270,15 +1283,27 @@ class BookmarkClusterer:
 
     def _build_cluster_reason(self, bookmarks: List[dict]) -> str:
         features = [self.build_feature_set(bookmark) for bookmark in bookmarks]
-        topic = Counter(feature.primary_topic for feature in features if feature.primary_topic).most_common(2)
-        resource_type = Counter(feature.resource_type for feature in features if feature.resource_type).most_common(1)
-        hints = Counter(token for feature in features for token in feature.cluster_hints).most_common(3)
-        rule_roots = Counter(
+        topic = self._stable_most_common(
+            Counter(feature.primary_topic for feature in features if feature.primary_topic),
+            2,
+        )
+        resource_type = self._stable_most_common(
+            Counter(feature.resource_type for feature in features if feature.resource_type),
+            1,
+        )
+        hints = self._stable_most_common(
+            Counter(token for feature in features for token in feature.cluster_hints),
+            3,
+        )
+        rule_roots = self._stable_most_common(Counter(
             root
             for feature in features
             for root in sorted(feature.rule_root_weights, key=lambda name: (-feature.rule_root_weights[name], name))[:1]
-        ).most_common(2)
-        registered = Counter(feature.registered_domain for feature in features if feature.registered_domain).most_common(2)
+        ), 2)
+        registered = self._stable_most_common(
+            Counter(feature.registered_domain for feature in features if feature.registered_domain),
+            2,
+        )
         parts = []
         if topic:
             parts.append("主题重合集中在 " + ", ".join(name for name, _ in topic))
@@ -1600,6 +1625,18 @@ def _is_default_or_generic_category(category: str, tidy_root_name: str = "待整
     )
 
 
+def _label_matches_source_host(label: str, top_domains: list[dict[str, Any]]) -> bool:
+    normalized_label = normalize_topic_token(label)
+    if not normalized_label:
+        return False
+    for item in top_domains:
+        domain = str(item.get("domain") or "").lower().strip(".")
+        host_label = domain.split(".", 1)[0] if domain else ""
+        if host_label and normalized_label == normalize_topic_token(host_label):
+            return True
+    return False
+
+
 def stable_cluster_id(bookmarks: List[dict]) -> str:
     identities = []
     for bookmark in bookmarks:
@@ -1626,6 +1663,7 @@ def build_cluster_payloads(
     threshold: int,
     discovery_root_name: str = "发现主题",
     tidy_root_name: str = "待整理",
+    discovery_min_support: int = 2,
 ) -> list[dict[str, Any]]:
     cluster_groups = clusterer.cluster_bookmarks(bookmarks)
     payloads: list[dict[str, Any]] = []
@@ -1699,21 +1737,24 @@ def build_cluster_payloads(
         )
         if generic_platform_share >= 0.8 and normal_category_support < 0.25:
             discovery_allowed = False
+        source_host_label = _label_matches_source_host(cluster_label, top_domains)
+        if source_host_label and normal_category_support < 0.5:
+            discovery_allowed = False
         if len(cluster) == 1 and dominant_categories and not _is_default_or_generic_category(dominant_category, tidy_root_name):
             destination_root = dominant_categories[0]["root"]
         elif _is_default_or_generic_category(dominant_category, tidy_root_name) and average_rule_confidence < 0.55:
-            destination_root = discovery_root_name if discovery_allowed and has_discovered_topic and len(cluster) >= 2 else tidy_root_name
+            destination_root = discovery_root_name if discovery_allowed and has_discovered_topic and len(cluster) >= discovery_min_support else tidy_root_name
         elif not dominant_rule_roots:
-            if discovery_allowed and has_discovered_topic and len(cluster) >= 2:
+            if discovery_allowed and has_discovered_topic and len(cluster) >= discovery_min_support:
                 destination_root = discovery_root_name
             elif dominant_categories and dominant_categories[0]["share"] >= 0.5 and not _is_default_or_generic_category(dominant_category, tidy_root_name):
                 destination_root = fallback_root
             else:
                 destination_root = tidy_root_name
         elif normal_category_support < 0.25 and average_rule_confidence < 0.65:
-            destination_root = discovery_root_name if discovery_allowed and has_discovered_topic and len(cluster) >= 2 else tidy_root_name
+            destination_root = discovery_root_name if discovery_allowed and has_discovered_topic and len(cluster) >= discovery_min_support else tidy_root_name
         elif rule_purity < 0.45 or top_support - second_support < 0.1:
-            destination_root = discovery_root_name if discovery_allowed and has_discovered_topic and len(cluster) >= 2 else tidy_root_name
+            destination_root = discovery_root_name if discovery_allowed and has_discovered_topic and len(cluster) >= discovery_min_support else tidy_root_name
         else:
             destination_root = dominant_rule_roots[0]["root"]
         route_reasons = []
@@ -1723,6 +1764,8 @@ def build_cluster_payloads(
             route_reasons.append("review_required_guard")
         if generic_platform_share >= 0.8 and normal_category_support < 0.25:
             route_reasons.append("generic_platform_guard")
+        if source_host_label and normal_category_support < 0.5:
+            route_reasons.append("source_host_label_guard")
         if destination_root == discovery_root_name:
             route_reasons.append("routed_to_discovery")
         elif destination_root == tidy_root_name:
@@ -2053,7 +2096,7 @@ def _tidy_label_candidates(
     generic_platform = clusterer._is_generic_platform(feature.registered_domain or feature.domain)
     root_hint = _bookmark_tidy_root_hint(bookmark, tidy_root_name=tidy_root_name)
     label_context = root_hint or bucket_name
-    minimum_open_topic_score = 3 if bucket_name == "低置信度" else 2
+    minimum_open_topic_score = 3 if bucket_name == "主题不明确" else 2
     candidates: list[dict[str, Any]] = []
     seen: set[str] = set()
 
@@ -2129,7 +2172,7 @@ def build_tidy_semantic_bundles(
 
     for bookmark in bookmarks:
         feature = clusterer.build_feature_set(bookmark)
-        identity = feature.canonical_identity or str(bookmark.get("id") or bookmark.get("url") or "")
+        identity = str(bookmark.get("id") or bookmark.get("url") or feature.canonical_identity or "")
         if not identity:
             continue
         identity_to_bookmark[identity] = bookmark
@@ -2159,7 +2202,6 @@ def build_tidy_semantic_bundles(
             key = (item["root_hint"], item["key"])
             if key in selected_keys:
                 grouped_identities[key].append(identity)
-                assigned_identities.add(identity)
                 break
 
     bundles: list[dict[str, Any]] = []
@@ -2167,6 +2209,7 @@ def build_tidy_semantic_bundles(
         bookmarks_in_group = [identity_to_bookmark[item] for item in identities if item in identity_to_bookmark]
         if len(bookmarks_in_group) < min_support:
             continue
+        assigned_identities.update(identities)
         label = sorted(
             candidate_labels[key].items(),
             key=lambda item: (-item[1], -len(normalize_topic_token(item[0])), item[0]),
@@ -2234,14 +2277,14 @@ def build_tidy_semantic_bundles(
         )
         for bookmark in group:
             feature = clusterer.build_feature_set(bookmark)
-            identity = feature.canonical_identity or str(bookmark.get("id") or bookmark.get("url") or "")
+            identity = str(bookmark.get("id") or bookmark.get("url") or feature.canonical_identity or "")
             if identity:
                 root_fallback_assigned.add(identity)
 
     leftovers = [
         bookmark
         for bookmark in leftovers
-        if (clusterer.build_feature_set(bookmark).canonical_identity or str(bookmark.get("id") or bookmark.get("url") or "")) not in root_fallback_assigned
+        if str(bookmark.get("id") or bookmark.get("url") or clusterer.build_feature_set(bookmark).canonical_identity or "") not in root_fallback_assigned
     ]
     bundles.sort(
         key=lambda item: (-item["support_count"], -int(item.get("priority", 0) or 0), item["bundle_label"]),
@@ -2259,6 +2302,8 @@ def restructure_tidy_root_for_display(
     display_options = display_options or {}
     semantic_min_support = int(display_options.get("tidy_semantic_min_support", 2))
     root_fallback_min_count = int(display_options.get("tidy_root_fallback_min_count", 3))
+    resource_group_min_count = int(display_options.get("tidy_resource_group_min_count", 5))
+    resource_group_max_count = int(display_options.get("tidy_resource_group_max_count", 40))
     rewritten = copy.deepcopy(tidy_payload)
     bucket_nodes = {
         name: {
@@ -2294,7 +2339,7 @@ def restructure_tidy_root_for_display(
             continue
         bucket_name = _tidy_bucket_name(_pick_dominant_tidy_bucket(child_bookmarks))
         merge_from = list(child_payload.get("merge_from_categories") or [])
-        if len(child_bookmarks) == 1 or not _is_high_quality_tidy_label(clusterer, child_name, bucket_name, child_payload):
+        if len(child_bookmarks) < semantic_min_support or not _is_high_quality_tidy_label(clusterer, child_name, bucket_name, child_payload):
             add_bookmarks_to_bucket(bucket_name, child_bookmarks, merge_from=merge_from)
             continue
 
@@ -2327,7 +2372,48 @@ def restructure_tidy_root_for_display(
                 "preserve_children": True,
             }
             clusterer._merge_named_subcategory(bucket_node["subcategories"], label, payload)
-        bucket_node["bookmarks"].extend(leftovers)
+        resource_groups: dict[str, list[dict]] = defaultdict(list)
+        for bookmark in leftovers:
+            resource_type = str(bookmark.get("classification", {}).get("resource_type") or "其他").strip()
+            resource_groups[resource_type if resource_type and resource_type != "未知" else "其他"].append(bookmark)
+        grouped_resource_ids: set[int] = set()
+        for resource_type, group in sorted(resource_groups.items(), key=lambda item: (-len(item[1]), item[0])):
+            if resource_type == "其他" or len(group) < resource_group_min_count:
+                continue
+            grouped_resource_ids.update(id(bookmark) for bookmark in group)
+            display_groups = [(resource_type, group)]
+            if resource_group_max_count > 0 and len(group) > resource_group_max_count:
+                year_groups: dict[str, list[dict]] = defaultdict(list)
+                for bookmark in group:
+                    signal_pack = bookmark.get("signal_pack") or build_signal_pack(bookmark)
+                    year = str(signal_pack_sections(signal_pack)["context_time"].get("time_bucket", {}).get("year") or "").strip()
+                    year_groups[year or "较早"].append(bookmark)
+                if len(year_groups) > 1 and max(map(len, year_groups.values())) <= resource_group_max_count:
+                    display_groups = [
+                        (f"{resource_type} {year}", items)
+                        for year, items in sorted(year_groups.items(), reverse=True)
+                    ]
+            for display_label, display_group in display_groups:
+                clusterer._merge_named_subcategory(
+                    bucket_node["subcategories"],
+                    display_label,
+                    {
+                        "name": display_label,
+                        "category": f"{tidy_root_name}/{bucket_name}/{display_label}",
+                        "subcategories": {},
+                        "bookmarks": display_group,
+                        "count": len(display_group),
+                        "cluster_reason": f"待整理条目按稳定属性归档: {display_label}",
+                        "representative_tokens": [],
+                        "source_folder_reused": False,
+                        "source_folder_quality_score": 0.0,
+                        "merge_from_categories": [],
+                        "preserve_children": True,
+                    },
+                )
+        bucket_node["bookmarks"].extend(
+            bookmark for bookmark in leftovers if id(bookmark) not in grouped_resource_ids
+        )
 
     final_subcategories = {}
     total_count = 0
@@ -2398,6 +2484,62 @@ def build_auto_root_groups(root_hierarchy: dict[str, dict], display_options: dic
     return specs
 
 
+def split_oversized_leaf_by_resource_type(payload: dict, threshold: int = 40) -> dict:
+    """Split dense topic leaves into stable resource-type folders for browsing."""
+    result = copy.deepcopy(payload)
+    children = result.get("subcategories") or {}
+    if children:
+        result["subcategories"] = {
+            name: split_oversized_leaf_by_resource_type(child, threshold)
+            for name, child in children.items()
+        }
+        return result
+
+    bookmarks = list(result.get("bookmarks") or [])
+    if threshold <= 0 or len(bookmarks) < threshold:
+        return result
+
+    resource_groups: dict[str, list[dict]] = defaultdict(list)
+    for bookmark in bookmarks:
+        resource_type = str(
+            bookmark.get("classification", {}).get("resource_type")
+            or bookmark.get("metadata", {}).get("resource_type")
+            or "其他"
+        ).strip()
+        resource_groups[resource_type if resource_type and resource_type != "未知" else "其他"].append(bookmark)
+    substantial_groups = {
+        name: items
+        for name, items in resource_groups.items()
+        if len(items) >= 3
+    }
+    if len(substantial_groups) < 2:
+        return result
+
+    grouped_ids = {id(bookmark) for items in substantial_groups.values() for bookmark in items}
+    leftovers = [bookmark for bookmark in bookmarks if id(bookmark) not in grouped_ids]
+    if leftovers:
+        substantial_groups.setdefault("其他", []).extend(leftovers)
+
+    result["bookmarks"] = []
+    result["subcategories"] = {
+        name: {
+            "name": name,
+            "category": result.get("category") or result.get("name"),
+            "bookmarks": items,
+            "subcategories": {},
+            "count": len(items),
+            "cluster_reason": "超大主题目录按资源类型拆分",
+            "representative_tokens": [],
+            "source_folder_reused": False,
+            "source_folder_quality_score": 0.0,
+            "merge_from_categories": list(result.get("merge_from_categories") or []),
+        }
+        for name, items in sorted(substantial_groups.items(), key=lambda item: (-len(item[1]), item[0]))
+    }
+    result["preserve_children"] = True
+    return result
+
+
 def build_display_hierarchy(
     clusterer: BookmarkClusterer,
     root_hierarchy: dict[str, dict],
@@ -2416,6 +2558,14 @@ def build_display_hierarchy(
             display_root_hierarchy[tidy_root_name],
             tidy_root_name=tidy_root_name,
             display_options=display_options,
+        )
+    oversized_leaf_threshold = int(display_options.get("oversized_leaf_threshold", 40) or 0)
+    for root_name in list(display_root_hierarchy):
+        if root_name in {discovery_root_name, tidy_root_name, "其他/未分类"}:
+            continue
+        display_root_hierarchy[root_name] = split_oversized_leaf_by_resource_type(
+            display_root_hierarchy[root_name],
+            oversized_leaf_threshold,
         )
     normal_roots = {
         root
@@ -2631,6 +2781,74 @@ def generate_rule_suggestions(
     }
 
 
+def _display_tree_quality(display_hierarchy: dict[str, dict] | None) -> dict[str, Any]:
+    folder_count = 0
+    leaf_folder_count = 0
+    singleton_leaf_folder_count = 0
+    singleton_leaf_bookmark_count = 0
+    oversized_leaf_folders: list[dict[str, Any]] = []
+    max_depth = 0
+    max_leaf_bookmarks = 0
+
+    def walk(name: str, payload: dict, path: list[str]) -> None:
+        nonlocal folder_count, leaf_folder_count, singleton_leaf_folder_count
+        nonlocal singleton_leaf_bookmark_count, max_depth, max_leaf_bookmarks
+        folder_count += 1
+        current_path = [*path, str(payload.get("name") or name)]
+        max_depth = max(max_depth, len(current_path))
+        children = list((payload.get("subcategories") or {}).items())
+        children.extend(
+            (str(child.get("name") or "未命名目录"), child)
+            for child in (payload.get("children") or [])
+            if isinstance(child, dict)
+        )
+        direct_count = len(payload.get("bookmarks") or [])
+        if not children:
+            leaf_folder_count += 1
+            max_leaf_bookmarks = max(max_leaf_bookmarks, direct_count)
+            if direct_count == 1:
+                singleton_leaf_folder_count += 1
+                singleton_leaf_bookmark_count += 1
+            if direct_count >= 40:
+                oversized_leaf_folders.append(
+                    {"path": " / ".join(current_path), "bookmark_count": direct_count}
+                )
+        for child_name, child_payload in children:
+            walk(child_name, child_payload, current_path)
+
+    for root_name, root_payload in (display_hierarchy or {}).items():
+        walk(root_name, root_payload, [])
+
+    oversized_leaf_folders.sort(key=lambda item: (-item["bookmark_count"], item["path"]))
+    return {
+        "folder_count": folder_count,
+        "leaf_folder_count": leaf_folder_count,
+        "singleton_leaf_folder_count": singleton_leaf_folder_count,
+        "singleton_leaf_bookmark_count": singleton_leaf_bookmark_count,
+        "max_depth": max_depth,
+        "max_leaf_bookmarks": max_leaf_bookmarks,
+        "oversized_leaf_folder_count": len(oversized_leaf_folders),
+        "oversized_leaf_folders": oversized_leaf_folders[:10],
+    }
+
+
+def _display_bookmark_identities(display_hierarchy: dict[str, dict] | None) -> list[str]:
+    identities: list[str] = []
+
+    def walk(payload: dict) -> None:
+        for bookmark in payload.get("bookmarks") or []:
+            identities.append(str(bookmark.get("id") or bookmark.get("url") or ""))
+        for child in (payload.get("subcategories") or {}).values():
+            walk(child)
+        for child in payload.get("children") or []:
+            if isinstance(child, dict):
+                walk(child)
+
+    for payload in (display_hierarchy or {}).values():
+        walk(payload)
+    return identities
+
+
 def generate_quality_report(
     bookmarks: list[dict],
     cluster_profiles: list[dict[str, Any]],
@@ -2693,9 +2911,12 @@ def generate_quality_report(
     review_required_count = 0
     review_required_normal_category_count = 0
     review_required_default_category_count = 0
+    user_action_required_count = 0
     for bookmark in bookmarks:
         signal_pack = bookmark.get("signal_pack") or build_signal_pack(bookmark)
         link_health = signal_pack_sections(signal_pack)["health_access"].get("link_health", {})
+        if link_health.get("user_action_required", False):
+            user_action_required_count += 1
         if not link_health.get("review_required", False):
             continue
         review_required_count += 1
@@ -2761,7 +2982,106 @@ def generate_quality_report(
         discovery_payload = display_hierarchy.get(discovery_root_name)
         if discovery_payload and int(discovery_payload.get("count", 0) or 0) < 3:
             small_discovery_standalone = True
-    return {
+    destination_bookmark_counts: Counter[str] = Counter()
+    confirmation_bucket_counts: Counter[str] = Counter()
+    for profile in cluster_profiles:
+        destination = str(profile.get("destination_root") or tidy_root_name)
+        destination_bookmark_counts[destination] += len(profile.get("bookmarks", []))
+    for bookmark in bookmarks:
+        bucket = str(bookmark.get("classification", {}).get("confirmation_bucket") or "none")
+        confirmation_bucket_counts[bucket] += 1
+
+    normal_profiles = [
+        profile
+        for profile in cluster_profiles
+        if profile.get("destination_root") not in {discovery_root_name, tidy_root_name}
+    ]
+    normal_bookmark_count = sum(len(profile.get("bookmarks", [])) for profile in normal_profiles)
+    low_purity_normal_profiles = [
+        profile
+        for profile in normal_profiles
+        if float(profile.get("rule_purity", 0.0) or 0.0) < 0.7
+    ]
+    low_purity_normal_bookmark_count = sum(
+        len(profile.get("bookmarks", [])) for profile in low_purity_normal_profiles
+    )
+    weighted_normal_purity = (
+        sum(
+            float(profile.get("rule_purity", 0.0) or 0.0) * len(profile.get("bookmarks", []))
+            for profile in normal_profiles
+        ) / normal_bookmark_count
+        if normal_bookmark_count else 0.0
+    )
+    label_issues = []
+    for profile in cluster_profiles:
+        label = str(profile.get("cluster_label") or "").strip()
+        normalized_label = normalize_topic_token(label)
+        issue_codes = []
+        if normalized_label in GENERIC_PLATFORM_TOKENS:
+            issue_codes.append("generic_platform_label")
+        if is_source_like_topic_token(label) or is_noisy_topic_token(label):
+            issue_codes.append("source_or_noisy_label")
+        if (
+            profile.get("destination_root") == discovery_root_name
+            and _label_matches_source_host(label, list(profile.get("top_domains") or []))
+        ):
+            issue_codes.append("source_host_label")
+        if issue_codes:
+            label_issues.append(
+                {
+                    "cluster_id": profile.get("cluster_id"),
+                    "cluster_label": label,
+                    "size": len(profile.get("bookmarks", [])),
+                    "destination_root": profile.get("destination_root"),
+                    "issue_codes": sorted(set(issue_codes)),
+                }
+            )
+    label_issues.sort(key=lambda item: (-item["size"], item["cluster_label"]))
+    tree_quality = _display_tree_quality(display_hierarchy)
+    source_identities = [str(bookmark.get("id") or bookmark.get("url") or "") for bookmark in bookmarks]
+    display_identities = _display_bookmark_identities(display_hierarchy)
+    source_identity_set = set(source_identities)
+    display_identity_counts = Counter(display_identities)
+    display_missing_identities = sorted(source_identity_set - set(display_identity_counts))
+    display_duplicate_count = sum(max(count - 1, 0) for count in display_identity_counts.values())
+
+    guardrail_values = {
+        "folder_only_classification_count": folder_only_count,
+        "low_confidence_normal_category_count": low_confidence_normal_count,
+        "generic_platform_domain_suggestion_count": generic_suggestion_count,
+        "fetch_blocked_discovery_cluster_count": sum(
+            1
+            for profile in discovery_clusters
+            if float(profile.get("fetch_blocked_share", 0.0) or 0.0) >= 0.5
+        ),
+        "display_missing_bookmark_count": len(display_missing_identities),
+        "display_duplicate_bookmark_count": display_duplicate_count,
+    }
+    guardrail_checks = [
+        {
+            "name": name,
+            "expected": 0,
+            "actual": actual,
+            "status": "pass" if actual == 0 else "fail",
+        }
+        for name, actual in guardrail_values.items()
+    ]
+    warnings = []
+    if low_purity_normal_bookmark_count:
+        warnings.append("low_purity_normal_clusters")
+    if label_issues:
+        warnings.append("source_or_platform_cluster_labels")
+    if tree_quality["oversized_leaf_folder_count"]:
+        warnings.append("oversized_leaf_folders")
+    if tree_quality["leaf_folder_count"] and (
+        tree_quality["singleton_leaf_folder_count"] / tree_quality["leaf_folder_count"] >= 0.35
+    ):
+        warnings.append("too_many_singleton_leaf_folders")
+    guardrail_status = "pass" if all(item["status"] == "pass" for item in guardrail_checks) else "fail"
+    assessment_status = "fail" if guardrail_status == "fail" else ("needs_review" if warnings else "pass")
+
+    report = {
+        "schema_version": QUALITY_REPORT_SCHEMA_VERSION,
         "metrics": {
             "total_bookmarks": len(bookmarks),
             "folder_only_classification_count": folder_only_count,
@@ -2775,11 +3095,9 @@ def generate_quality_report(
                 (len(profile.get("bookmarks", [])) for profile, _ in generic_platform_clusters),
                 default=0,
             ),
-            "fetch_blocked_discovery_cluster_count": sum(
-                1
-                for profile in discovery_clusters
-                if float(profile.get("fetch_blocked_share", 0.0) or 0.0) >= 0.5
-            ),
+            "fetch_blocked_discovery_cluster_count": guardrail_values["fetch_blocked_discovery_cluster_count"],
+            "display_missing_bookmark_count": guardrail_values["display_missing_bookmark_count"],
+            "display_duplicate_bookmark_count": guardrail_values["display_duplicate_bookmark_count"],
             "normal_root_direct_bookmark_count": normal_root_direct_bookmark_count,
             "normal_root_direct_bookmark_share": round(
                 normal_root_direct_bookmark_count / normal_root_bookmark_count,
@@ -2796,6 +3114,73 @@ def generate_quality_report(
             "review_required_count": review_required_count,
             "review_required_normal_category_count": review_required_normal_category_count,
             "review_required_default_category_count": review_required_default_category_count,
+            "content_unavailable_normal_category_share": round(
+                review_required_normal_category_count / review_required_count,
+                4,
+            ) if review_required_count else 1.0,
+            "user_action_required_count": user_action_required_count,
+            "normal_bookmark_count": normal_bookmark_count,
+            "normal_bookmark_share": round(normal_bookmark_count / len(bookmarks), 4) if bookmarks else 0.0,
+            "discovery_bookmark_count": destination_bookmark_counts.get(discovery_root_name, 0),
+            "tidy_bookmark_count": destination_bookmark_counts.get(tidy_root_name, 0),
+            "weighted_normal_cluster_purity": round(weighted_normal_purity, 4),
+            "low_purity_normal_cluster_count": len(low_purity_normal_profiles),
+            "low_purity_normal_bookmark_count": low_purity_normal_bookmark_count,
+            "source_or_platform_label_count": len(label_issues),
+            **{f"display_{key}": value for key, value in tree_quality.items() if not isinstance(value, list)},
+        },
+        "assessment": {
+            "status": assessment_status,
+            "guardrail_status": guardrail_status,
+            "warnings": warnings,
+        },
+        "guardrails": {
+            "status": guardrail_status,
+            "checks": guardrail_checks,
+        },
+        "outcome_distribution": {
+            "destination_bookmark_counts": dict(sorted(destination_bookmark_counts.items())),
+            "confirmation_bucket_counts": dict(sorted(confirmation_bucket_counts.items())),
+        },
+        "browse_tree": tree_quality,
+        "display_conservation": {
+            "source_bookmark_count": len(source_identities),
+            "display_bookmark_count": len(display_identities),
+            "display_unique_bookmark_count": len(display_identity_counts),
+            "missing_bookmark_count": len(display_missing_identities),
+            "duplicate_bookmark_count": display_duplicate_count,
+            "missing_bookmark_identities": display_missing_identities[:20],
+        },
+        "cluster_cohesion": {
+            "weighted_normal_purity": round(weighted_normal_purity, 4),
+            "low_purity_normal_cluster_count": len(low_purity_normal_profiles),
+            "low_purity_normal_bookmark_count": low_purity_normal_bookmark_count,
+            "lowest_purity_normal_clusters": [
+                {
+                    "cluster_id": profile.get("cluster_id"),
+                    "cluster_label": profile.get("cluster_label"),
+                    "size": len(profile.get("bookmarks", [])),
+                    "rule_purity": float(profile.get("rule_purity", 0.0) or 0.0),
+                    "destination_root": profile.get("destination_root"),
+                    "dominant_categories": profile.get("dominant_categories", [])[:4],
+                    "representative_bookmarks": [
+                        {
+                            "name": bookmark.get("name"),
+                            "url": bookmark.get("url"),
+                            "category": bookmark.get("classification", {}).get("category"),
+                        }
+                        for bookmark in profile.get("bookmarks", [])[:5]
+                    ],
+                }
+                for profile in sorted(
+                    low_purity_normal_profiles,
+                    key=lambda item: (float(item.get("rule_purity", 0.0) or 0.0), -len(item.get("bookmarks", []))),
+                )[:10]
+            ],
+        },
+        "label_hygiene": {
+            "issue_count": len(label_issues),
+            "issues": label_issues[:20],
         },
         "largest_discovery_clusters": [
             {
@@ -2869,6 +3254,71 @@ def generate_quality_report(
                 for domain, count in review_domain_counts.most_common(20)
             ],
         },
+        "content_unavailable_outcome": {
+            "bookmark_count": review_required_count,
+            "normal_category_count": review_required_normal_category_count,
+            "default_category_count": review_required_default_category_count,
+            "normal_category_share": round(
+                review_required_normal_category_count / review_required_count,
+                4,
+            ) if review_required_count else 1.0,
+            "user_action_required_count": user_action_required_count,
+        },
+    }
+    return report
+
+
+def build_user_action_review_hierarchy(bookmarks: list[dict], clusterer: BookmarkClusterer) -> dict[str, Any]:
+    """Build the optional HTML mirror from actionable link issues, not enrichment failures."""
+    review_groups: dict[str, list[dict]] = defaultdict(list)
+    for bookmark in bookmarks:
+        signal_pack = bookmark.get("signal_pack") or build_signal_pack(bookmark)
+        link_health = signal_pack_sections(signal_pack)["health_access"].get("link_health", {})
+        if not link_health.get("user_action_required"):
+            continue
+        label = str(link_health.get("user_action_label") or "链接需要复查")
+        review_groups[label].append(bookmark)
+
+    if not review_groups:
+        return {}
+    return {
+        "待审阅": {
+            "name": "待审阅",
+            "category": "待审阅",
+            "subcategories": {
+                f"待审阅/{reason}": {
+                    "name": reason,
+                    "bookmarks": group,
+                    "count": len(group),
+                    "cluster_reason": f"按用户可处理的问题归档: {reason}",
+                    "representative_tokens": clusterer._representative_tokens(group),
+                    "source_folder_reused": False,
+                    "source_folder_quality_score": 0.0,
+                    "merge_from_categories": sorted(
+                        {
+                            bookmark.get("classification", {}).get("category", "")
+                            for bookmark in group
+                            if bookmark.get("classification")
+                        }
+                    ),
+                }
+                for reason, group in sorted(review_groups.items())
+            },
+            "bookmarks": [],
+            "count": sum(len(group) for group in review_groups.values()),
+            "cluster_reason": "仅镜像真正需要用户处理的链接问题",
+            "representative_tokens": [],
+            "source_folder_reused": False,
+            "source_folder_quality_score": 0.0,
+            "merge_from_categories": sorted(
+                {
+                    bookmark.get("classification", {}).get("category", "")
+                    for group in review_groups.values()
+                    for bookmark in group
+                    if bookmark.get("classification")
+                }
+            ),
+        }
     }
 
 
@@ -3070,6 +3520,7 @@ def main() -> int:
         threshold=options.get("max_bookmarks_without_clustering", 20),
         discovery_root_name=discovery_root_name,
         tidy_root_name=tidy_root_name,
+        discovery_min_support=int(options.get("discovery_min_support", 2)),
     )
     raw_hierarchy = build_clustered_root_hierarchy(
         clusterer,
@@ -3086,36 +3537,7 @@ def main() -> int:
         options.get("display", {}),
     )
 
-    review_groups: dict[str, list[dict]] = defaultdict(list)
-    for bookmark in bookmarks:
-        classification = bookmark.get("classification", {})
-        if classification.get("review_required"):
-            review_groups[classification.get("review_category") or "其他抓取异常"].append(bookmark)
-
-    review_hierarchy = {}
-    if review_groups:
-        review_hierarchy["待审阅"] = {
-            "category": "待审阅",
-            "subcategories": {
-                f"待审阅/{reason}": {
-                    "bookmarks": group,
-                    "count": len(group),
-                    "cluster_reason": f"按异常原因归档: {reason}",
-                    "representative_tokens": clusterer._representative_tokens(group),
-                    "source_folder_reused": False,
-                    "source_folder_quality_score": 0.0,
-                    "merge_from_categories": sorted({bookmark.get("classification", {}).get("category", "") for bookmark in group if bookmark.get("classification")}),
-                }
-                for reason, group in sorted(review_groups.items())
-            },
-            "bookmarks": [],
-            "count": sum(len(group) for group in review_groups.values()),
-            "cluster_reason": "将抓取异常书签镜像到统一待审阅目录",
-            "representative_tokens": [],
-            "source_folder_reused": False,
-            "source_folder_quality_score": 0.0,
-            "merge_from_categories": sorted({bookmark.get("classification", {}).get("category", "") for group in review_groups.values() for bookmark in group if bookmark.get("classification")}),
-        }
+    review_hierarchy = build_user_action_review_hierarchy(bookmarks, clusterer)
 
     rule_suggestions = generate_rule_suggestions(
         cluster_profiles,

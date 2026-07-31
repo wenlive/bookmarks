@@ -334,6 +334,7 @@ def test_generate_html_supports_recursive_nodes():
 def test_fetch_normalize_metadata_classifies_review_categories():
     timeout_md = fetch_module.normalize_metadata({"fetch_status": "timeout", "error": "Request timeout"})
     assert timeout_md["link_health"]["reason_label"] == "访问超时"
+    assert timeout_md["link_health"]["user_action_required"] is False
 
     cert_md = fetch_module.normalize_metadata(
         {
@@ -342,6 +343,8 @@ def test_fetch_normalize_metadata_classifies_review_categories():
         }
     )
     assert cert_md["link_health"]["reason_label"] == "证书异常"
+    assert cert_md["link_health"]["user_action_required"] is True
+    assert cert_md["link_health"]["user_action_label"] == "安全证书异常"
 
     dns_md = fetch_module.normalize_metadata(
         {
@@ -350,15 +353,20 @@ def test_fetch_normalize_metadata_classifies_review_categories():
         }
     )
     assert dns_md["link_health"]["reason_label"] == "DNS/连接失败"
+    assert dns_md["link_health"]["user_action_required"] is False
 
     access_md = fetch_module.normalize_metadata({"fetch_status": "broken", "status_code": 403, "error": "HTTP 403"})
     assert access_md["link_health"]["reason_label"] == "访问受限/疑似反爬"
+    assert access_md["link_health"]["user_action_required"] is False
 
     missing_md = fetch_module.normalize_metadata({"fetch_status": "broken", "status_code": 404, "error": "HTTP 404"})
     assert missing_md["link_health"]["reason_label"] == "链接不存在"
+    assert missing_md["link_health"]["user_action_required"] is True
+    assert missing_md["link_health"]["user_action_label"] == "可能已失效"
 
     rate_md = fetch_module.normalize_metadata({"fetch_status": "broken", "status_code": 429, "error": "HTTP 429"})
     assert rate_md["link_health"]["reason_label"] == "访问受限/频率限制"
+    assert rate_md["link_health"]["user_action_required"] is False
 
 
 def test_parse_response_soup_uses_xml_parser_for_xml_content():
@@ -394,6 +402,7 @@ def test_trusted_access_policy_skips_review_and_reports_for_selected_domains(tmp
     )
     assert trusted["link_health"]["reason_code"] == "trusted_access"
     assert trusted["link_health"]["review_required"] is False
+    assert trusted["link_health"]["user_action_required"] is False
     assert trusted["link_health"]["trusted_override"] is True
     assert trusted["link_health"]["raw_reason_code"] == "access_denied"
 
@@ -510,6 +519,91 @@ def test_fetch_step_reuses_successful_cache_and_retries_failures(tmp_path):
     assert result["bookmarks"][1]["metadata"]["title"] == "Fetched"
 
 
+def test_fetch_step_checkpoints_completed_batches_for_resume(tmp_path):
+    input_file = tmp_path / "parsed.json"
+    output_file = tmp_path / "enriched.json"
+    input_file.write_text(
+        json.dumps(
+            {
+                "bookmarks": [
+                    {
+                        "id": f"bookmark_{index}",
+                        "name": f"Bookmark {index}",
+                        "url": f"https://example.com/{index}",
+                        "domain": "example.com",
+                        "original_folder_path": [],
+                    }
+                    for index in range(3)
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    calls = 0
+
+    async def fake_process_batch(bookmarks, session, timeout, max_retries, proxy_options, review_policy=None):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("simulated interruption")
+        return [
+            {
+                **bookmark,
+                "metadata": build_metadata("Fetched", "", "", "Fetched", "Fetched"),
+            }
+            for bookmark in bookmarks
+        ]
+
+    original = fetch_module.process_batch
+    fetch_module.process_batch = fake_process_batch
+    try:
+        try:
+            asyncio.run(
+                fetch_module.fetch_webpage_info_async(
+                    input_file,
+                    output_file,
+                    {
+                        "concurrent_limit": 1,
+                        "per_host_limit": 1,
+                        "timeout": 1,
+                        "delay": 0,
+                        "batch_size": 1,
+                        "max_retries": 0,
+                        "force_refetch": False,
+                        "user_agent": "test-agent",
+                        "proxy": {
+                            "enabled": False,
+                            "trust_env": False,
+                            "http_proxy": None,
+                            "https_proxy": None,
+                            "all_proxy": None,
+                        },
+                    },
+                    common_module.configure_logging(
+                        common_module.PipelineConfig.load(ROOT / "skill_config.json"),
+                        "INFO",
+                    ),
+                )
+            )
+            assert False, "fetch should propagate the simulated interruption"
+        except RuntimeError as exc:
+            assert str(exc) == "simulated interruption"
+    finally:
+        fetch_module.process_batch = original
+
+    checkpoint = json.loads(output_file.read_text(encoding="utf-8"))
+    assert checkpoint["schema_version"] == common_module.FETCH_OUTPUT_SCHEMA_VERSION
+    assert checkpoint["checkpoint"] == {
+        "complete": False,
+        "processed_count": 1,
+        "total_bookmarks": 3,
+    }
+    assert checkpoint["bookmarks"][0]["metadata"]["fetch_status"] == "success"
+    assert checkpoint["bookmarks"][1]["metadata"]["checkpoint_pending"] is True
+    assert fetch_module.should_retry_bookmark(checkpoint["bookmarks"][1], False)
+
+
 def test_run_fetch_passes_retries_without_proxy_when_requested(tmp_path):
     input_file = tmp_path / "parsed.json"
     output_file = tmp_path / "enriched.json"
@@ -571,6 +665,12 @@ def test_run_fetch_passes_retries_without_proxy_when_requested(tmp_path):
     assert result["stats"]["proxy_trust_env"] is True
     assert result["stats"]["pass_deltas"]["success_delta"] == 1
     assert [item["name"] for item in result["stats"]["pass_summaries"]] == ["proxy", "direct_retry"]
+
+
+def test_fetch_cli_exposes_max_retries_override():
+    source = (ROOT / "scripts" / "3_fetch_webpage_info.py").read_text(encoding="utf-8")
+    assert 'parser.add_argument("--max-retries"' in source
+    assert 'options["max_retries"] = max(args.max_retries, 0)' in source
 
 
 def test_fetch_step_reuses_trusted_cached_result_without_retry(tmp_path):
@@ -746,6 +846,57 @@ def test_cluster_and_generate_html_include_review_hierarchy():
     assert "Broken Link" in html
 
 
+def test_review_hierarchy_only_mirrors_user_actionable_link_issues():
+    dns_failure = _bookmark(
+        1,
+        name="Temporarily unavailable",
+        url="https://example.com/temporary",
+        domain="example.com",
+        category="待整理",
+        folder=["Inbox"],
+    )
+    dns_failure["metadata"].update(
+        {
+            "fetch_status": "error",
+            "link_health": {
+                "review_required": True,
+                "user_action_required": False,
+                "reason_code": "dns_connection",
+                "reason_label": "DNS/连接失败",
+            },
+        }
+    )
+    missing = _bookmark(
+        2,
+        name="Missing page",
+        url="https://example.com/missing",
+        domain="example.com",
+        category="待整理",
+        folder=["Inbox"],
+    )
+    missing["metadata"].update(
+        {
+            "fetch_status": "broken",
+            "link_health": {
+                "review_required": True,
+                "user_action_required": True,
+                "user_action_label": "可能已失效",
+                "reason_code": "not_found",
+                "reason_label": "链接不存在",
+            },
+        }
+    )
+
+    review_hierarchy = cluster_module.build_user_action_review_hierarchy(
+        [dns_failure, missing],
+        cluster_module.BookmarkClusterer(min_cluster_size=2),
+    )
+
+    assert review_hierarchy["待审阅"]["count"] == 1
+    group = review_hierarchy["待审阅"]["subcategories"]["待审阅/可能已失效"]
+    assert [bookmark["name"] for bookmark in group["bookmarks"]] == ["Missing page"]
+
+
 def test_optimize_tree_collapses_single_child_and_merges_others():
     clusterer = cluster_module.BookmarkClusterer(min_cluster_size=3, merge_small_nodes_threshold=2)
     node = {
@@ -900,6 +1051,50 @@ def test_low_confidence_tidy_clusters_do_not_return_to_normal_roots():
     assert profiles[0]["destination_root"] == "发现主题"
     assert profiles[0]["average_rule_confidence"] == 0.4
     assert profiles[0]["normal_category_support"] == 0
+
+
+def test_source_host_named_cluster_does_not_become_discovered_topic():
+    clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2)
+    bookmarks = [
+        _bookmark(
+            index,
+            name=f"Draveness article {index}",
+            url=f"https://draveness.me/posts/{index}",
+            domain="draveness.me",
+            category="待整理",
+            folder=["Reading"],
+            resource_type="博客",
+            description=f"Unrelated article {index}",
+        )
+        for index in range(1, 4)
+    ]
+    for bookmark in bookmarks:
+        bookmark["classification"].update(
+            {
+                "display_category": "待整理",
+                "cluster_hints": ["Draveness"],
+                "open_topic_candidates": [
+                    {"topic": "Draveness", "score": 4, "sources": ["site_profile"]}
+                ],
+                "rule_roots": [],
+                "rule_confidence": 0.4,
+                "confirmation_bucket": "rule_gap",
+            }
+        )
+
+    profiles = cluster_module.build_cluster_payloads(
+        clusterer,
+        bookmarks,
+        threshold=20,
+        discovery_root_name="发现主题",
+        tidy_root_name="待整理",
+        discovery_min_support=3,
+    )
+
+    assert len(profiles) == 1
+    assert profiles[0]["cluster_label"] == "Draveness"
+    assert profiles[0]["destination_root"] == "待整理"
+    assert "source_host_label_guard" in profiles[0]["decision_trace"]["route_reasons"]
 
 
 def test_generic_platform_domain_does_not_force_unrelated_repos_into_one_cluster():
@@ -2017,6 +2212,100 @@ def test_classifier_keeps_generated_taxonomy_and_open_topics_together(tmp_path):
     assert any(candidate["topic"] == "Neon" for candidate in classification["open_topic_candidates"])
 
 
+def test_classifier_downgrades_near_tied_cross_root_content_matches(tmp_path):
+    taxonomy_file = tmp_path / "user_taxonomy.json"
+    taxonomy_file.write_text(
+        json.dumps(
+            {
+                "schema_version": "user_taxonomy/v1",
+                "categories": {
+                    "数据库/RocksDB": {
+                        "domains": [],
+                        "keywords": ["rocksdb", "lsm-tree"],
+                        "title_patterns": [],
+                    },
+                    "学术/论文": {
+                        "domains": [],
+                        "keywords": ["sigmod", "vldb"],
+                        "title_patterns": [],
+                    },
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    classifier = classify_module.BookmarkClassifier(user_taxonomy_file=taxonomy_file)
+    classification = classifier.classify_bookmark(
+        {
+            "id": "bookmark_publications",
+            "name": "Research publications",
+            "url": "https://people.example.edu/publications",
+            "domain": "people.example.edu",
+            "original_folder_path": ["Reading"],
+            "metadata": {
+                "title": "Research publications",
+                "description": "SIGMOD and VLDB publications about RocksDB and LSM-tree design",
+                "keywords": "sigmod,vldb,rocksdb,lsm-tree",
+            },
+        }
+    )
+
+    assert classification["category"] == "待整理"
+    assert classification["primary_topics"] == []
+    assert classification["confidence_components"]["cross_root_ambiguous"] is True
+    assert "cross_root_score_ambiguity" in classification["needs_confirmation_reasons"]
+
+
+def test_classifier_does_not_assign_homepage_from_aggregate_post_content(tmp_path):
+    taxonomy_file = tmp_path / "user_taxonomy.json"
+    taxonomy_file.write_text(
+        json.dumps(
+            {
+                "schema_version": "user_taxonomy/v1",
+                "categories": {
+                    "数据库/MySQL": {
+                        "domains": [],
+                        "keywords": ["mysql", "innodb", "polardb"],
+                        "title_patterns": ["MySQL", "InnoDB", "PolarDB"],
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    classifier = classify_module.BookmarkClassifier(user_taxonomy_file=taxonomy_file)
+    classification = classifier.classify_bookmark(
+        {
+            "id": "bookmark_blog_home",
+            "name": "Neo的技术博客",
+            "url": "https://example.com/",
+            "domain": "example.com",
+            "original_folder_path": ["Reading"],
+            "metadata": {
+                "fetch_status": "success",
+                "site_profile": {
+                    "site": {"site_name": "Neo的技术博客"},
+                    "page": {
+                        "headings": {
+                            "h1": [
+                                "从MySQL InnoDB物理文件格式深入理解索引",
+                                "PolarDB数据库性能大赛分享",
+                            ]
+                        },
+                        "main_text_preview": "MySQL InnoDB PolarDB and many unrelated recent posts",
+                    },
+                },
+            },
+        }
+    )
+
+    assert classification["category"] == "待整理"
+    assert classification["confidence_components"]["homepage_aggregate_only"] is True
+    assert "homepage_aggregate_only" in classification["needs_confirmation_reasons"]
+
+
 def test_classifier_uses_generated_taxonomy_without_rule_files(tmp_path):
     taxonomy_file = tmp_path / "user_taxonomy.json"
     taxonomy_file.write_text(
@@ -2468,7 +2757,8 @@ def test_classifier_keeps_user_taxonomy_assignment_for_review_required_links(tmp
     assert classification["needs_confirmation"] is True
     assert classification["confirmation_bucket"] == "fetch_blocked"
     assert classification["rule_confidence"] == 0.95
-    assert "待审阅" in classification["quality_signals"]
+    assert classification["user_action_required"] is False
+    assert "待审阅" not in classification["quality_signals"]
     assert classification["classification_evidence"]["llm_assignment"]["category"] == "数据库/TiDB"
     assert classification["confidence_components"]["llm_assignment_applied"] is True
 
@@ -2520,7 +2810,8 @@ def test_classifier_keeps_strong_rule_topic_for_review_required_links(tmp_path):
     assert classification["confirmation_bucket"] == "fetch_blocked"
     assert classification["rule_confidence"] >= 0.55
     assert classification["confidence_components"]["review_topic_preserved"] is True
-    assert "待审阅" in classification["quality_signals"]
+    assert classification["user_action_required"] is False
+    assert "待审阅" not in classification["quality_signals"]
 
 
 def test_classifier_keeps_title_and_keyword_driven_topic_for_access_limited_links(tmp_path):
@@ -2830,6 +3121,15 @@ def test_quality_report_tracks_folder_and_generic_domain_metrics():
     assert report["metrics"]["tidy_small_visible_group_count"] == 1
     assert report["metrics"]["review_required_count"] == 0
     assert report["metrics"]["review_required_normal_category_count"] == 0
+    assert report["metrics"]["display_missing_bookmark_count"] == 0
+    assert report["metrics"]["display_duplicate_bookmark_count"] == 0
+    assert report["display_conservation"]["display_bookmark_count"] == 1
+    assert report["schema_version"] == common_module.QUALITY_REPORT_SCHEMA_VERSION
+    assert report["guardrails"]["status"] == "pass"
+    assert report["outcome_distribution"]["destination_bookmark_counts"] == {"待整理": 1}
+    assert report["browse_tree"]["max_depth"] == 3
+    assert report["browse_tree"]["singleton_leaf_folder_count"] == 1
+    assert report["assessment"]["status"] == "needs_review"
     platform_report = cluster_module.generate_quality_report(
         bookmarks,
         [
@@ -3305,16 +3605,57 @@ def test_build_display_hierarchy_restructures_tidy_root_by_confirmation_bucket()
         clusterer,
         root_hierarchy,
         [],
-        common_module.DEFAULT_DISPLAY_OPTIONS,
+        {**common_module.DEFAULT_DISPLAY_OPTIONS, "tidy_semantic_min_support": 2},
     )
 
     tidy_root = display_hierarchy["待整理"]
-    assert set(tidy_root["subcategories"]) == {"抓取受阻", "规则缺口", "低置信度"}
-    assert "Docker" in tidy_root["subcategories"]["规则缺口"]["subcategories"]
-    assert not tidy_root["subcategories"]["抓取受阻"]["subcategories"]
-    assert [bookmark["name"] for bookmark in tidy_root["subcategories"]["抓取受阻"]["bookmarks"]] == ["Blocked Q"]
-    assert [bookmark["name"] for bookmark in tidy_root["subcategories"]["低置信度"]["bookmarks"]] == ["Ambiguous Note"]
+    assert set(tidy_root["subcategories"]) == {"信息不足", "候选主题", "主题不明确"}
+    assert "Docker" in tidy_root["subcategories"]["候选主题"]["subcategories"]
+    assert not tidy_root["subcategories"]["信息不足"]["subcategories"]
+    assert [bookmark["name"] for bookmark in tidy_root["subcategories"]["信息不足"]["bookmarks"]] == ["Blocked Q"]
+    assert [bookmark["name"] for bookmark in tidy_root["subcategories"]["主题不明确"]["bookmarks"]] == ["Ambiguous Note"]
     assert "Question" in root_hierarchy["待整理"]["subcategories"]
+
+
+def test_build_display_hierarchy_splits_oversized_topic_leaf_by_resource_type():
+    clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2)
+    documents = [
+        _bookmark(index, name=f"PostgreSQL Doc {index}", url=f"https://postgresql.org/docs/{index}", domain="postgresql.org", category="数据库/PostgreSQL", folder=[])
+        for index in range(1, 5)
+    ]
+    blogs = [
+        _bookmark(index, name=f"PostgreSQL Blog {index}", url=f"https://example.com/blog/{index}", domain="example.com", category="数据库/PostgreSQL", folder=[], resource_type="博客")
+        for index in range(5, 9)
+    ]
+    root_hierarchy = {
+        "数据库": {
+            "name": "数据库",
+            "category": "数据库",
+            "bookmarks": [],
+            "subcategories": {
+                "PostgreSQL": {
+                    "name": "PostgreSQL",
+                    "category": "数据库/PostgreSQL",
+                    "bookmarks": documents + blogs,
+                    "subcategories": {},
+                    "count": 8,
+                }
+            },
+            "count": 8,
+        }
+    }
+
+    display_hierarchy = cluster_module.build_display_hierarchy(
+        clusterer,
+        root_hierarchy,
+        [],
+        {**common_module.DEFAULT_DISPLAY_OPTIONS, "oversized_leaf_threshold": 8},
+    )
+
+    postgres = display_hierarchy["数据库"]["subcategories"]["PostgreSQL"]
+    assert postgres["bookmarks"] == []
+    assert set(postgres["subcategories"]) == {"博客", "文档"}
+    assert all(child["count"] == 4 for child in postgres["subcategories"].values())
 
 
 def test_build_tidy_semantic_bundles_groups_rule_gap_bookmarks_by_semantic_label():
@@ -3389,6 +3730,49 @@ def test_build_tidy_semantic_bundles_groups_rule_gap_bookmarks_by_semantic_label
     assert all(bundle["support_count"] == 2 for bundle in bundles)
 
 
+def test_tidy_semantic_bundles_preserve_distinct_spa_fragment_bookmarks():
+    clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2)
+    bookmarks = [
+        _bookmark(
+            index,
+            name=f"Chaspark topic {index}",
+            url=f"https://www.chaspark.com/#/questions/{index}",
+            domain="www.chaspark.com",
+            category="待整理",
+            folder=["Inbox"],
+        )
+        for index in range(1, 4)
+    ]
+    for bookmark in bookmarks:
+        bookmark["classification"].update(
+            {
+                "resource_type": "文档",
+                "cluster_hints": ["Chaspark"],
+                "open_topic_candidates": [
+                    {"topic": "Chaspark", "score": 4, "sources": ["title"]}
+                ],
+                "rule_candidates": [],
+                "rule_roots": [],
+                "confirmation_bucket": "rule_gap",
+            }
+        )
+
+    bundles, leftovers = cluster_module.build_tidy_semantic_bundles(
+        clusterer,
+        bookmarks,
+        bucket_name="候选主题",
+        min_support=3,
+    )
+
+    grouped = [bookmark for bundle in bundles for bookmark in bundle["bookmarks"]]
+    assert len(grouped) + len(leftovers) == 3
+    assert {bookmark["id"] for bookmark in grouped + leftovers} == {
+        "bookmark_1",
+        "bookmark_2",
+        "bookmark_3",
+    }
+
+
 def test_build_display_hierarchy_does_not_duplicate_discovery_root_when_already_grouped():
     clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2)
     root_hierarchy = {
@@ -3411,6 +3795,29 @@ def test_build_display_hierarchy_does_not_duplicate_discovery_root_when_already_
     )
 
     assert list(display_hierarchy) == ["待整理"]
+
+
+def test_cluster_reason_is_stable_when_bookmark_order_changes():
+    clusterer = cluster_module.BookmarkClusterer(min_cluster_size=2)
+    bookmarks = [
+        _bookmark(
+            index,
+            name=f"Topic {label}",
+            url=f"https://example{index}.com/{label}",
+            domain=f"example{index}.com",
+            category=f"主题/{label}",
+            folder=["Inbox"],
+        )
+        for index, label in enumerate(("zeta", "alpha", "beta"), start=1)
+    ]
+    for bookmark, label in zip(bookmarks, ("zeta", "alpha", "beta")):
+        bookmark["classification"]["cluster_hints"] = [label]
+
+    forward = clusterer._build_cluster_reason(bookmarks)
+    reverse = clusterer._build_cluster_reason(list(reversed(bookmarks)))
+
+    assert forward == reverse
+    assert "主题/alpha, 主题/beta" in forward
 
 
 def test_reset_pipeline_outputs_keeps_source_bookmark_file(tmp_path):

@@ -63,13 +63,15 @@
     "folder_weight": 25,
     "content_weight": 15,
     "auto_assign_confidence": 0.55,
-    "confirm_confidence": 0.65
+    "confirm_confidence": 0.65,
+    "cross_root_ambiguity_margin": 2.0
   },
   "clustering_options": {
     "min_cluster_size": 10,
     "max_keywords": 3,
     "max_bookmarks_without_clustering": 20,
     "domain_split_min_size": 4,
+    "discovery_min_support": 3,
     "discovery_root_name": "发现主题",
     "tidy_root_name": "待整理",
     "root_groups": [],
@@ -84,8 +86,11 @@
       "tidy_root_name": "待整理",
       "max_direct_normal_roots": 10,
       "standalone_discovery_min_count": 3,
-      "tidy_semantic_min_support": 2,
-      "tidy_root_fallback_min_count": 3
+      "tidy_semantic_min_support": 3,
+      "tidy_root_fallback_min_count": 3,
+      "tidy_resource_group_min_count": 5,
+      "tidy_resource_group_max_count": 40,
+      "oversized_leaf_threshold": 40
     }
   },
   "logging": {

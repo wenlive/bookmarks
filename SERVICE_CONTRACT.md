@@ -30,6 +30,7 @@ description: 面向外部人类使用者和 agent 的本地服务契约。说明
 6. 生成可重新导入 Chrome 的 HTML
 
 默认目标不是最大化“覆盖率”，而是最大化“可解释、可复核、少错分”的可用性。
+第 3 步是可选内容增强，不是第 4-6 步产出有效 HTML 的硬前置条件。
 
 ## 输入契约
 
@@ -213,6 +214,7 @@ export all_proxy=socks5://127.0.0.1:7897
 当前抓取层还显式包含这些通用能力：
 
 - per-host throttle
+- per-batch atomic checkpoint and resumable cache
 - same-origin warmup retry
 - homepage fallback on failure
 - default-off external metadata fallback
@@ -227,6 +229,7 @@ export all_proxy=socks5://127.0.0.1:7897
 2. taxonomy follow-up
 
 没有第三个默认模型步骤，也没有隐藏在线 API 调用。
+抓取失败本身不要求增加 Agent 步骤；现有 bootstrap/follow-up 会消费保存标题、URL identity 和未解决簇证据。
 
 ### 每个步骤必须读什么
 
@@ -268,7 +271,9 @@ python3 scripts/apply_taxonomy_response.py --config skill_config.json --response
 - 原始 Chrome 文件夹路径不是强 topic evidence
 - broad platform domain 不会作为 topic domain 被默认引入
 - 抓取失败不会直接删除书签
-- review-required 条目会镜像到 `待审阅`
+- 无正文时仍会使用保存标题、URL identity、同簇证据和 generated taxonomy
+- `review_required` 是内部网络/内容诊断；只有 `user_action_required` 条目会镜像到 `待审阅`
+- timeout、DNS、403、限流和服务端错误不会作为文件夹暴露给最终用户
 - 低置信正常分类应该回落到 `待整理`
 - generated taxonomy 负责用户特定 specialization，而不是 tracked default source
 
@@ -281,6 +286,18 @@ python3 scripts/apply_taxonomy_response.py --config skill_config.json --response
 - 不承诺默认运行会自动调用任意在线模型
 - 不承诺 `--reset-all` 会清除用户级 generated taxonomy
 - 不承诺发现主题命名一定完全语义化
+
+## 质量报告契约
+
+`output/reports/quality_report.json` 使用 `quality_report/v2`，同时评估分类、聚类和最终显示层。至少应检查：
+
+- `guardrails.status`
+- `display_conservation`
+- `weighted_normal_cluster_purity`
+- `content_unavailable_outcome`
+- `browse_tree`
+
+主层级必须满足 `display_missing_bookmark_count == 0` 和 `display_duplicate_bookmark_count == 0`。HTML 中额外出现的书签只允许来自 `待审阅` 的用户动作镜像。
 
 ## 作为外部 skill/service 消费时的最短路径
 
